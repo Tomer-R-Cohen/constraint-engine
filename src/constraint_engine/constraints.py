@@ -37,6 +37,18 @@ Rule types and their args:
                       The entity shares a slot with at least one candidate.
     fixed             {"entity": id, "slot": int}
                       The entity holds this slot (and maybe others).
+    run               {"group": <selector>, "units": [[int, ...], ...],
+                       "of": "work"|"off", "min": int|None, "max": int|None}
+                      "units" are time units in order (e.g. the slots of
+                      each day); an entity works a unit if it holds any of
+                      its slots. Every stretch of consecutive worked units
+                      (of="work") or unworked units (of="off") is min..max
+                      long. A stretch touching the start or end of the
+                      schedule is never too short: what came before or
+                      comes after is unknown.
+    transition        {"group": <selector>, "pairs": [[int, int], ...]}
+                      No entity of the group holds both slots of any pair
+                      ("no morning shift right after a night shift").
     partner_requests  {"requests": {id: [id, ...]}, "weight_mutual": float,
                        "weight_two": float}
                       Soft goal: each requester shares a slot with a mutual
@@ -66,7 +78,7 @@ from typing import Literal
 import pandas as pd
 
 ConstraintType = Literal[
-    "capacity", "load", "balance", "together", "separate", "at_least_one_of", "fixed", "partner_requests"
+    "capacity", "load", "run", "transition", "balance", "together", "separate", "at_least_one_of", "fixed", "partner_requests"
 ]
 ConstraintSource = Literal["builtin_default", "chat", "manual"]
 
@@ -79,6 +91,8 @@ DEFAULT_WEIGHT = {
     "separate": 5.0,
     "at_least_one_of": 5.0,
     "fixed": 2.0,
+    "run": 2.0,
+    "transition": 2.0,
 }
 DEFAULT_WEIGHT_MUTUAL = 5.0
 DEFAULT_WEIGHT_TWO = 3.0

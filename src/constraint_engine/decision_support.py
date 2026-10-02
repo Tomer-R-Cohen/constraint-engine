@@ -208,6 +208,36 @@ def verify_assignment(
                 expected={"min": lo, "max": hi},
                 actual={"fewest": min(loads.values(), default=0), "most": max(loads.values(), default=0)},
                 shortfall=sum(outside.values()), entities=bad)
+        elif con.type == "run":
+            members = resolve_group_members(df, args["group"])
+            units = [set(unit) for unit in args["units"]]
+            lo, hi = args.get("min"), args.get("max")
+            target = args.get("of", "work") == "work"
+            bad_stretches = 0
+            bad_entities = []
+            for e in members:
+                held = holds(e)
+                worked = [bool(held & unit) for unit in units]
+                broken = [
+                    (start, length) for start, length in stretches(worked, target)
+                    if (hi is not None and length > hi)
+                    or (lo is not None and length < lo and start > 0 and start + length < len(units))
+                ]
+                if broken:
+                    bad_stretches += len(broken)
+                    bad_entities.append(e)
+            add(con, not bad_entities, text.RUN_OK if not bad_entities else text.RUN_BAD.format(count=len(bad_entities)),
+                expected={"min": lo, "max": hi}, actual={"stretches_outside": bad_stretches},
+                shortfall=bad_stretches, entities=bad_entities)
+        elif con.type == "transition":
+            members = resolve_group_members(df, args["group"])
+            pairs = [(int(a), int(b)) for a, b in args["pairs"]]
+            hits = {e: [(a, b) for a, b in pairs if a in holds(e) and b in holds(e)] for e in members}
+            hits = {e: found for e, found in hits.items() if found}
+            count = sum(len(found) for found in hits.values())
+            add(con, not hits, text.TRANSITION_OK if not hits else text.TRANSITION_BAD.format(count=len(hits)),
+                expected=0, actual={e: [[name(a), name(b)] for a, b in found] for e, found in hits.items()},
+                shortfall=count, entities=list(hits))
         elif con.type in ("separate", "together"):
             first, second = args["entity_a"], args["entity_b"]
             applicable = first in expected_set and second in expected_set and bool(holds(first)) and bool(holds(second))
@@ -279,6 +309,18 @@ def verify_assignment(
     entities_assigned = sum(1 for e in expected_entities if holds(e))
     return VerificationReport(valid, summary, len(expected_set), entities_assigned,
                               hard_ok, hard_bad, soft_ok, soft_bad, checks)
+
+
+def stretches(values: list[bool], target: bool) -> list[tuple[int, int]]:
+    """(start, length) of every maximal stretch of `target` in `values`."""
+    found, start = [], None
+    for index, value in enumerate(values + [not target]):
+        if value == target and start is None:
+            start = index
+        elif value != target and start is not None:
+            found.append((start, index - start))
+            start = None
+    return found
 
 
 def assignment_distance(first: dict, second: dict, num_slots: int, interchangeable: bool = True) -> int:

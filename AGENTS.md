@@ -4,9 +4,9 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-A general engine for "assign X to Y" problems — employee shift rostering,
-teacher timetabling, student class placement, and similar — built on Google
-OR-Tools CP-SAT. It will be exposed to AI agents (e.g. Claude Desktop) as
+A general constraint optimization engine for assignment problems — employee
+shift rostering, teacher timetabling, student class placement, and the rest
+of that family — built on Google OR-Tools CP-SAT. It will be exposed to AI agents (e.g. Claude Desktop) as
 MCP tools: the user uploads a spreadsheet and describes rules in chat, the
 agent translates those into tool calls, and the engine solves.
 
@@ -38,6 +38,54 @@ separately; this repo is a new product, not a branch of it.
 6. **Reproducible.** Fixed seed; store solutions rather than relying on
    re-solving to get the same answer.
 
+## Architecture (target)
+
+**General core, closed set of building blocks.** The engine aims to cover
+the whole assignment/scheduling family, but never by letting the agent
+write free-form models (see principle 1). Generality comes from a small,
+fixed catalog of general constraints that combine, not from a growing list
+of domain-specific rule types.
+
+Vocabulary: **items** (what is placed: students, employees, lessons) are the
+rows of the user's sheet; **resources** (where they go: classes, shifts,
+time+room cells) are named, with attributes (day, shift, room...).
+
+**Decisions** — three kinds, built in this order:
+
+1. **assign**: which resources each item holds (a true/false per item ×
+   resource pair). Covers placement, partitioning, rostering, timetabling
+   (resources = time × room). *Built.*
+2. **when**: a start time and duration per item (CP-SAT interval
+   variables). Covers machine/project scheduling, appointments. *Later, on
+   a real use case.*
+3. **order**: a sequence or route (CP-SAT circuits). Covers routing,
+   sequencing. *Later, on a real use case.*
+
+The spec and core must be shaped so 2 and 3 can be added without a rewrite.
+
+**Constraints** — every one is: a selector (which items, which resources),
+a grouping (per resource, per item, per item per day, per value of a
+column...), parameters, mode (hard, or soft with priority low/medium/high),
+a plain-English read-back, and an independent checker.
+
+| Block | Means | For decision |
+|---|---|---|
+| **Count / Sum** | count placements (or sum a numeric column: hours, size, cost) per group, within a range or as even as possible | assign |
+| **Share** | item A shares a resource with between X and Y of a list (together, apart, at least one of) | assign |
+| **Stretch / Transition** | along an ordered attribute (day, period): lengths of worked/off stretches; B may not follow A | assign |
+| **No-overlap / Cumulative** | intervals don't clash / stay under capacity | when |
+| **Precedence** | A before B (with optional gap) | when, order |
+| **Circuit** | a route visits each stop once | order |
+
+Preferences are not a separate kind: any block in soft mode is a
+preference. "How many resources per item" is an ordinary Count rule.
+
+Known gaps, deliberately out of scope: continuous/nonlinear quantities
+(CP-SAT is integer-only), very large routing (use OR-Tools routing), stable
+matching. A last-resort escape hatch, only if real use demands it: a small
+checked expression language over selectors, marked unconfirmed until the
+user approves its read-back.
+
 ## Current state
 
 The solver core came from Shibutzit and is now domain-neutral: entities are
@@ -58,7 +106,7 @@ weight.
 
 | Module | Role |
 |---|---|
-| `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity` (per-slot band, optional slot subset), `load` (per-entity band of slots held, optional subset), `balance`, `together`/`separate`/`at_least_one_of` (share / never share a slot), `fixed`, `partner_requests`. |
+| `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity` (per-slot band, optional slot subset), `load` (per-entity band of slots held, optional subset or per-group), `run` (stretch lengths of worked/off time units), `transition` (forbidden slot pairs, e.g. night then morning), `balance`, `together`/`separate`/`at_least_one_of` (share / never share a slot), `fixed`, `partner_requests`. |
 | `optimizer.py` | CP-SAT model. One assumption literal per hard rule → infeasibility traced to rule ids (note: `SufficientAssumptionsForInfeasibility` returns variable indices, not list positions). Flexible rules bent via slack; option diversity incl. slot-renaming symmetry; anchor/hints. |
 | `decision_support.py` | `verify_assignment` (independent rule checker, per-rule `shortfall`), `PortfolioSearch` (rounds of 3: perfect vs compromise), `rank_tradeoffs` (compares options by each soft rule's shortfall). |
 | `feasibility.py` | Pre-solve arithmetic checks for hard capacity and load rules (counts slot places, using the load bands). |
@@ -81,11 +129,13 @@ weight.
    level.~~ Done (`spec.py`, `compiler.py`, `readback.py`). Not yet: rule
    bundles (named rule sets shared by many entities, like nurse contracts),
    several entity types per problem (timetabling events), storing results.
-4. Grow the rule catalog toward the 11 shapes in the research report:
-   coverage/count limits, no double-booking, eligibility/availability/fixed,
-   counts over a time window, consecutive runs, transitions/rest, gaps,
-   spread across days, same/different/together/apart/order,
-   balance/fairness, preferences.
+4. Consolidate the rule types into the building blocks above for the
+   *assign* decision: `capacity`/`load`/`fixed`/`balance` → **Count/Sum**
+   (add sum-of-column and per-column-value grouping); `together`/
+   `separate`/`at_least_one_of`/`partner_requests` → **Share**;
+   `run`/`transition` → **Stretch/Transition** (add an option to ignore
+   stretches at the edges, for timetable gaps). `slots_per_entity` becomes a
+   Count rule. Keep read-backs, checker and tests green throughout.
 5. MCP server on top: `load_data`, `add_rule` (returns read-back),
    `list_rules`/`remove_rule`, `solve` (3 options), `explain_conflict`,
    `why(entity)`, `export`.

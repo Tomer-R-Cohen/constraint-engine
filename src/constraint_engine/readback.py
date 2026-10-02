@@ -19,9 +19,11 @@ from constraint_engine.spec import (
     LoadRule,
     PartnerRequestsRule,
     ProblemSpec,
+    RunRule,
     SeparateRule,
     SlotSelector,
     TogetherRule,
+    TransitionRule,
 )
 
 
@@ -40,6 +42,10 @@ def _join(items, word: str = text.AND) -> str:
     if len(items) <= 1:
         return "".join(items)
     return f"{', '.join(items[:-1])} {word} {items[-1]}"
+
+
+def _plural(noun: str) -> str:
+    return noun if noun.endswith("s") else noun + "s"
 
 
 def band(lo: Optional[int], hi: Optional[int]) -> tuple[str, bool]:
@@ -116,6 +122,20 @@ def describe_rule(rule, spec: ProblemSpec, request_count: Optional[int] = None) 
         what = (v.slot if one else v.slots) + _slot_filter(rule.slots)
         per = text.PER.format(attribute=rule.per) if rule.per else ""
         body = text.RB_LOAD.format(subject=_entity_subject(rule.entities, spec), band=words, what=what, per=per)
+    elif isinstance(rule, RunRule):
+        words, one = band(rule.min, rule.max)
+        counting = text.RUN_COUNTING.format(slots=v.slots, filter=_slot_filter(rule.slots)) if _slot_filter(rule.slots) else ""
+        edge = text.RUN_EDGE if rule.min else ""
+        template = text.RB_RUN_WORK if rule.of == "work" else text.RB_RUN_OFF
+        body = template.format(subject=_entity_subject(rule.entities, spec), band=words,
+                               unit=rule.per if one else _plural(rule.per), units=_plural(rule.per),
+                               counting=counting, edge=edge)
+    elif isinstance(rule, TransitionRule):
+        window = (text.WINDOW_NEXT.format(unit=rule.per) if rule.within == 1
+                  else text.WINDOW_NEXT_N.format(n=rule.within, units=_plural(rule.per)))
+        body = text.RB_TRANSITION.format(subject=_entity_subject(rule.entities, spec), slot=v.slot,
+                                         after=_slot_filter(rule.after), forbid=_slot_filter(rule.not_followed_by),
+                                         window=window)
     elif isinstance(rule, BalanceRule):
         if rule.by_column is not None:
             body = text.RB_BALANCE_BY_COLUMN.format(entities=v.entities, slots=v.slots, column=rule.by_column)

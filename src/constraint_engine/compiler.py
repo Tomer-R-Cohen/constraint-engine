@@ -34,9 +34,11 @@ from constraint_engine.spec import (
     LoadRule,
     PartnerRequestsRule,
     ProblemSpec,
+    RunRule,
     SeparateRule,
     SlotSelector,
     TogetherRule,
+    TransitionRule,
     data_hash,
     spec_hash,
 )
@@ -215,6 +217,26 @@ class _Compiler:
                 args["slot_groups"] = self.per_groups(rid, rule.per, chosen)
             elif chosen is not None:
                 args["slots"] = chosen
+        elif isinstance(rule, RunRule):
+            chosen = self.slots(rid, rule.slots)
+            keep = None if chosen is None else set(chosen)
+            units = self.per_groups(rid, rule.per, None)
+            args = {"group": self.entity_group(rid, rule.entities), "min": rule.min, "max": rule.max, "of": rule.of,
+                    "units": [[s for s in unit if keep is None or s in keep] for unit in units]}
+        elif isinstance(rule, TransitionRule):
+            after = self.slots(rid, rule.after)
+            followed = self.slots(rid, rule.not_followed_by)
+            first = None if after is None else set(after)
+            then = None if followed is None else set(followed)
+            units = self.per_groups(rid, rule.per, None)
+            pairs = [
+                [a, b]
+                for i, unit in enumerate(units)
+                for later in units[i + 1:i + 1 + rule.within]
+                for a in unit if first is None or a in first
+                for b in later if then is None or b in then
+            ]
+            args = {"group": self.entity_group(rid, rule.entities), "pairs": pairs}
         elif isinstance(rule, BalanceRule):
             if rule.by_column is not None:
                 ok = self.column(rid, rule.by_column, flag=False)

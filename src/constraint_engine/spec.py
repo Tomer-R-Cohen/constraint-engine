@@ -160,6 +160,34 @@ class LoadRule(_RuleBase, _Band):
     per: Optional[str] = None
 
 
+class RunRule(_RuleBase, _Band):
+    """Stretch lengths over time. `per` is the slot attribute that makes the
+    time units (e.g. "day"), in the order units first appear in the slot
+    list. An entity works a unit if it holds any selected slot in it. Every
+    stretch of worked units (of="work") or unworked units (of="off") is
+    min..max long; a stretch at the start or end of the schedule is never
+    too short."""
+
+    type: Literal["run"]
+    entities: EntitySelector = Field(default_factory=EntitySelector)
+    slots: SlotSelector = Field(default_factory=SlotSelector)
+    per: str
+    of: Literal["work", "off"] = "work"
+
+
+class TransitionRule(_RuleBase):
+    """Rest between slots: an entity holding a slot matched by `after` holds
+    no slot matched by `not_followed_by` in the next `within` time units
+    (units made by the slot attribute `per`)."""
+
+    type: Literal["transition"]
+    entities: EntitySelector = Field(default_factory=EntitySelector)
+    after: SlotSelector
+    not_followed_by: SlotSelector
+    per: str
+    within: int = Field(default=1, ge=1)
+
+
 class BalanceRule(_RuleBase):
     """Spread entities evenly over the slots. Exactly one of: `entities`
     (one group), `by_column` (each value of a category column, as one rule),
@@ -220,7 +248,7 @@ class PartnerRequestsRule(_RuleBase):
 
 
 Rule = Annotated[
-    Union[CapacityRule, LoadRule, BalanceRule, TogetherRule, SeparateRule, AtLeastOneOfRule, FixedRule,
+    Union[CapacityRule, LoadRule, RunRule, TransitionRule, BalanceRule, TogetherRule, SeparateRule, AtLeastOneOfRule, FixedRule,
           PartnerRequestsRule],
     Field(discriminator="type"),
 ]

@@ -156,8 +156,10 @@ def optimize(
                 raise OptimizationError(
                     text.FIXED_TO_MISSING_SLOT.format(entity=c.args["entity"], slot=slot + 1, num_slots=k)
                 )
-        if c.type in ("capacity", "load"):
-            named = list(c.args.get("slots") or ()) + [s for group in c.args.get("slot_groups") or () for s in group]
+        if c.type in ("capacity", "load", "run", "transition"):
+            named = (list(c.args.get("slots") or ())
+                     + [s for group in (c.args.get("slot_groups") or c.args.get("units") or ()) for s in group]
+                     + [s for pair in c.args.get("pairs") or () for s in pair])
             for slot in named:
                 if slot < 0 or slot >= k:
                     raise OptimizationError(
@@ -361,6 +363,90 @@ def optimize(
                 -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{e}_{index}") for (e, index), expr in loads.items())
             )
 
+    def worked_literals(e, units: list[list[int]], of: str, prefix: str) -> list:
+        """One literal per time unit: true when the entity works the unit
+        (holds any of its slots), or, for of="off", when it does not."""
+        literals = []
+        for index, unit in enumerate(units):
+            w = model.NewBoolVar(f"{prefix}_works_{e}_{index}")
+            if unit:
+                model.AddMaxEquality(w, [x[e, s] for s in unit])
+            else:
+                model.Add(w == 0)  # nothing to hold: never worked
+            literals.append(w.Not() if of == "off" else w)
+        return literals
+
+    def run_patterns(literals: list, lo, hi) -> list[tuple[str, list, int]]:
+        """Each way a stretch can break the band, as (kind, literals, bound):
+        ("sum", window, hi) -- a window of hi+1 units all in the stretch;
+        ("clause", lits, 0) -- a stretch shorter than lo with a known unit
+        on both sides, written as the clause that forbids it."""
+        patterns = []
+        n_units = len(literals)
+        if hi is not None:
+            for start in range(n_units - hi):
+                patterns.append(("sum", literals[start:start + hi + 1], hi))
+        if lo is not None and lo >= 2:
+            for start in range(1, n_units):
+                for length in range(1, lo):
+                    end = start + length
+                    if end >= n_units:
+                        break
+                    clause = [literals[start - 1]] + [lit.Not() for lit in literals[start:end]] + [literals[end]]
+                    patterns.append(("clause", clause, 0))
+        return patterns
+
+    def compile_run(c: Constraint):
+        units = [list(unit) for unit in c.args["units"]]
+        lo, hi = c.args.get("min"), c.args.get("max")
+        of = c.args.get("of", "work")
+        patterns = [p for e in group_members(c.args["group"]) for p in run_patterns(worked_literals(e, units, of, c.id), lo, hi)]
+        if not patterns:
+            return
+        lit = enable_lit(c) if c.hard and not is_flexible(c) else None
+        penalties = []
+        for index, (kind, lits, bound) in enumerate(patterns):
+            if lit is not None:
+                if kind == "sum":
+                    model.Add(sum(lits) <= bound).OnlyEnforceIf(lit)
+                else:
+                    model.AddBoolOr(lits).OnlyEnforceIf(lit)
+                continue
+            broken = model.NewBoolVar(f"{c.id}_broken_{index}")
+            if kind == "sum":
+                model.Add(sum(lits) <= bound + broken)
+            else:
+                model.AddBoolOr(lits + [broken])
+            penalties.append(broken)
+        if is_flexible(c):
+            slack_terms.extend(penalties)
+        elif not c.hard:
+            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
+            if weight > 0:
+                objective_terms.append(-weight * sum(penalties))
+
+    def compile_transition(c: Constraint):
+        pairs = [(int(a), int(b)) for a, b in c.args["pairs"]]
+        members = group_members(c.args["group"])
+        if not pairs or not members:
+            return
+        lit = enable_lit(c) if c.hard and not is_flexible(c) else None
+        penalties = []
+        for e in members:
+            for a, b in pairs:
+                if lit is not None:
+                    model.Add(x[e, a] + x[e, b] <= 1).OnlyEnforceIf(lit)
+                    continue
+                both = model.NewBoolVar(f"{c.id}_both_{e}_{a}_{b}")
+                model.Add(x[e, a] + x[e, b] <= 1 + both)
+                penalties.append(both)
+        if is_flexible(c):
+            slack_terms.extend(penalties)
+        elif not c.hard:
+            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
+            if weight > 0:
+                objective_terms.append(-weight * sum(penalties))
+
     def compile_balance(c: Constraint):
         weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
         if not c.hard and weight <= 0:
@@ -474,6 +560,8 @@ def optimize(
     COMPILERS = {
         "capacity": compile_capacity,
         "load": compile_load,
+        "run": compile_run,
+        "transition": compile_transition,
         "balance": compile_balance,
         "separate": compile_separate,
         "together": compile_together,

@@ -30,11 +30,13 @@ against the data before solving, every rule has a plain-English read-back,
 and results come back in slot names, stamped with spec and data hashes.
 
 Rule types today: `capacity` (how many per slot), `load` (how many slots per
-entity, optionally per day/week/...), `balance`, `together` / `separate` /
-`at_least_one_of`, `fixed`, `partner_requests`.
+entity, optionally per day/week/...), `run` (stretches: "at most 5 days in a
+row", "days off in pairs"), `transition` (rest: "no morning shift after a
+night"), `balance`, `together` / `separate` / `at_least_one_of`, `fixed`,
+`partner_requests`.
 
-Next: a growing rule catalog (consecutive runs, rest between shifts, ...),
-then the MCP tools.
+Next: more of the rule catalog (best-effort coverage, fairness, rule
+bundles), then the MCP tools.
 
 ## Example spec
 
