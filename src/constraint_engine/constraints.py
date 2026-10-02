@@ -6,19 +6,34 @@ is inherently hard or soft. The optimizer, the independent verifier and the
 pre-solve checks all work over one list of these.
 
 Entities are the rows of the data frame and are identified by its index.
-Slots are numbered 0..num_slots-1.
+Slots are numbered 0..num_slots-1. An assignment maps each entity to the
+sorted list of slots it holds; how many it may hold is
+`SolverConfig.slots_per_entity` (one each for placement, several for
+rostering).
+
+"Shares a slot" below means the two entities hold at least one slot in
+common -- with one slot each, simply "are in the same slot".
 
 Rule types and their args:
 
-    capacity          {"group": <selector>, "min": int|None, "max": int|None}
-                      How many of the group may land in each slot.
+    capacity          {"group": <selector>, "min": int|None, "max": int|None,
+                       "slots": [int, ...]}
+                      How many of the group may hold each slot. "slots" is
+                      optional and limits the rule to those slots.
+    load              {"group": <selector>, "min": int|None, "max": int|None,
+                       "slots": [int, ...]}
+                      How many slots each entity of the group holds, counting
+                      only "slots" when given ("at most 2 night shifts").
     balance           {"group": <selector>, "weight": float}
                       Spread the group as evenly as possible over the slots.
     together          {"entity_a": id, "entity_b": id}
+                      The two share a slot.
     separate          {"entity_a": id, "entity_b": id}
+                      The two never share a slot.
     at_least_one_of   {"entity": id, "candidates": [id, ...]}
                       The entity shares a slot with at least one candidate.
     fixed             {"entity": id, "slot": int}
+                      The entity holds this slot (and maybe others).
     partner_requests  {"requests": {id: [id, ...]}, "weight_mutual": float,
                        "weight_two": float}
                       Soft goal: each requester shares a slot with a mutual
@@ -48,13 +63,14 @@ from typing import Literal
 import pandas as pd
 
 ConstraintType = Literal[
-    "capacity", "balance", "together", "separate", "at_least_one_of", "fixed", "partner_requests"
+    "capacity", "load", "balance", "together", "separate", "at_least_one_of", "fixed", "partner_requests"
 ]
 ConstraintSource = Literal["builtin_default", "chat", "manual"]
 
 # Weight a soft rule gets when its args carry none.
 DEFAULT_WEIGHT = {
     "capacity": 1.0,
+    "load": 1.0,
     "balance": 1.0,
     "together": 5.0,
     "separate": 5.0,
@@ -107,3 +123,11 @@ def subgroups(df: pd.DataFrame, group: dict) -> list[dict]:
     if kind == "columns":
         return [{"kind": "column", "column": c} for c in group["columns"]]
     return [group]
+
+
+def selected_slots(args: dict, num_slots: int) -> list[int]:
+    """The slots a capacity/load rule counts: its "slots" list, else all."""
+    chosen = args.get("slots")
+    if chosen is None:
+        return list(range(num_slots))
+    return sorted({int(s) for s in chosen})

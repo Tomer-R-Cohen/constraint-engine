@@ -1,7 +1,9 @@
 """CP-SAT assignment optimizer.
 
-Binary decision variables x[entity, slot] = 1 if the entity is assigned to
-the slot. Rules are supplied as a list of `Constraint` objects (see
+Binary decision variables x[entity, slot] = 1 if the entity holds the slot.
+How many slots each entity holds is `SolverConfig.slots_per_entity`: (1, 1)
+is placement (every entity in exactly one slot), wider bands are rostering.
+Rules are supplied as a list of `Constraint` objects (see
 constraints.py). Each hard rule is reified behind its own CP-SAT
 "assumption" literal; if the model turns out infeasible,
 `solver.SufficientAssumptionsForInfeasibility()` identifies a set of rules
@@ -26,6 +28,7 @@ from constraint_engine.constraints import (
     DEFAULT_WEIGHT_TWO,
     Constraint,
     resolve_group_members,
+    selected_slots,
     subgroups,
 )
 
@@ -40,6 +43,16 @@ class SolverConfig:
     to optimize(), not here."""
 
     num_slots: int = 6
+    # How many slots each entity holds, (min, max). (1, 1) is placement:
+    # every entity in exactly one slot. Rostering widens it and adds `load`
+    # rules for per-group bands.
+    slots_per_entity: tuple[int, int] = (1, 1)
+    # Whether slots are interchangeable labels (class 1..6) or distinct
+    # things (Monday morning). With interchangeable slots, two assignments
+    # that differ only by renaming slots are the same answer. None means
+    # interchangeable exactly when each entity holds one slot; it cannot be
+    # True otherwise.
+    slots_interchangeable: Optional[bool] = None
     time_limit_seconds: float = 60.0
     # Not a user dial, deliberately: the seed exists to keep solves
     # reproducible (see the num_search_workers note in optimize()). Changing
@@ -47,12 +60,20 @@ class SolverConfig:
     # which reads as the engine being random.
     random_seed: int = 42
 
+    @property
+    def single_slot(self) -> bool:
+        return tuple(self.slots_per_entity) == (1, 1)
+
+    @property
+    def interchangeable(self) -> bool:
+        return self.single_slot if self.slots_interchangeable is None else self.slots_interchangeable
+
 
 @dataclass
 class OptimizationResult:
     status_name: str
     is_feasible: bool
-    assignment: dict  # entity id -> slot index (0-based)
+    assignment: dict  # entity id -> sorted list of slot indexes (0-based)
     objective_value: Optional[float]
     wall_time_seconds: float
     solver_log: str = ""
@@ -81,8 +102,9 @@ def optimize(
         config: run parameters (slot count, time limit, seed).
         constraints: the full rule list. Inactive rules are skipped.
         excluded_assignments / min_assignment_distance: earlier answers the
-            result must differ from, by at least this many entities and as a
-            partition (renaming slots does not count as different).
+            result must differ from, in the slots of at least this many
+            entities -- and, when slots are interchangeable, as a partition
+            (renaming slots does not count as different).
         flexible_constraint_ids: hard rules that may bend. Each is compiled
             with measurable slack instead of being enforced, and the solve
             becomes lexicographic: first the smallest total slack, then the
@@ -103,10 +125,16 @@ def optimize(
 
     Raises:
         OptimizationError: if the configuration is structurally invalid
-            (e.g. zero slots, a rule fixing an entity to a missing slot).
+            (e.g. zero slots, a rule naming a missing slot).
     """
     if config.num_slots < 1:
         raise OptimizationError(text.NUM_SLOTS_TOO_SMALL)
+    load_min, load_max = (int(v) for v in config.slots_per_entity)
+    if not 0 <= load_min <= load_max:
+        raise OptimizationError(text.BAD_SLOTS_PER_ENTITY.format(min=load_min, max=load_max))
+    if config.interchangeable and not config.single_slot:
+        raise OptimizationError(text.INTERCHANGEABLE_NEEDS_SINGLE_SLOT)
+    single = config.single_slot
 
     excluded_assignments = excluded_assignments or []
     flexible_ids = set(flexible_constraint_ids or ())
@@ -124,6 +152,12 @@ def optimize(
                 raise OptimizationError(
                     text.FIXED_TO_MISSING_SLOT.format(entity=c.args["entity"], slot=slot + 1, num_slots=k)
                 )
+        if c.type in ("capacity", "load"):
+            for slot in c.args.get("slots") or ():
+                if slot < 0 or slot >= k:
+                    raise OptimizationError(
+                        text.RULE_NAMES_MISSING_SLOT.format(label=c.label, slot=slot + 1, num_slots=k)
+                    )
 
     model = cp_model.CpModel()
     x: dict[tuple, cp_model.IntVar] = {}
@@ -131,9 +165,13 @@ def optimize(
         for s in range(k):
             x[e, s] = model.NewBoolVar(f"x_{e}_{s}")
 
-    # Every entity assigned exactly one slot.
     for e in entities:
-        model.Add(sum(x[e, s] for s in range(k)) == 1)
+        held = sum(x[e, s] for s in range(k))
+        if load_min == load_max:
+            model.Add(held == load_min)
+        else:
+            model.Add(held >= load_min)
+            model.Add(held <= load_max)
 
     for slot, members in (fixed_slots or {}).items():
         if slot < 0 or slot >= k:
@@ -147,22 +185,36 @@ def optimize(
     # different seed alone often returns the same optimum.
     minimum_distance = max(1, int(min_assignment_distance))
     placement = {}
-    if excluded_assignments:
+    if excluded_assignments and config.interchangeable:
         for e in entities:
             placement[e] = model.NewIntVar(0, k - 1, f"placement_{e}")
             model.Add(placement[e] == sum(s * x[e, s] for s in range(k)))
-    for previous in excluded_assignments:
-        same_literals = [x[e, previous[e]] for e in entities if e in previous and 0 <= previous[e] < k]
-        if same_literals:
-            model.Add(sum(same_literals) <= len(same_literals) - min(minimum_distance, len(same_literals)))
+    for index, previous in enumerate(excluded_assignments):
+        held_before = {e: {s for s in previous[e] if 0 <= s < k} for e in entities if e in previous}
+        if single:
+            # One slot each: an entity moved iff it left its old slot.
+            stays = [x[e, s] for held in held_before.values() for s in held]
+            if stays:
+                model.Add(sum(stays) <= len(stays) - min(minimum_distance, len(stays)))
+        else:
+            moved = []
+            for e, held in held_before.items():
+                differences = [1 - x[e, s] for s in held] + [x[e, s] for s in range(k) if s not in held]
+                m = model.NewBoolVar(f"moved_{index}_{e}")
+                model.Add(m <= sum(differences))
+                moved.append(m)
+            if moved:
+                model.Add(sum(moved) >= min(minimum_distance, len(moved)))
+        if not config.interchangeable:
+            continue
         # Exclude the partition itself, including every renaming of slots.
         # Members must separate from an old group anchor, or two anchors merge.
         anchors = {}
         changed = []
         for e in entities:
-            if e not in previous:
+            if not held_before.get(e):
                 continue
-            group = previous[e]
+            group = next(iter(held_before[e]))
             if group not in anchors:
                 anchors[group] = e
                 continue
@@ -213,13 +265,32 @@ def optimize(
             both = model.NewBoolVar(f"both_{key[0]}_{key[1]}_{s}")
             model.AddMultiplicationEquality(both, [x[a, s], x[b, s]])
             same_terms.append(both)
-        model.Add(v == sum(same_terms))
+        if single:
+            model.Add(v == sum(same_terms))
+        else:
+            model.AddMaxEquality(v, same_terms)
         same_slot_vars[key] = v
         return v
 
-    def slot_counts_for_group(group: dict):
-        members = [m for m in resolve_group_members(df, group) if m in entity_set]
-        return [sum(x[e, s] for e in members) for s in range(k)]
+    def group_members(group: dict) -> list:
+        return [m for m in resolve_group_members(df, group) if m in entity_set]
+
+    def slot_counts_for_group(group: dict, slots=None):
+        members = group_members(group)
+        return [sum(x[e, s] for e in members) for s in (range(k) if slots is None else slots)]
+
+    def band_shortfall(expr, lo, hi, name: str):
+        """Units by which `expr` falls outside [lo, hi], as one expression."""
+        units = []
+        if lo is not None:
+            under = model.NewIntVar(0, max(0, int(lo)), f"{name}_under")
+            model.Add(expr + under >= lo)
+            units.append(under)
+        if hi is not None:
+            over = model.NewIntVar(0, max(n, k), f"{name}_over")
+            model.Add(expr - over <= hi)
+            units.append(over)
+        return sum(units)
 
     def add_spread_var(counts, name_prefix):
         max_v = model.NewIntVar(0, n, f"{name_prefix}_max")
@@ -236,19 +307,12 @@ def optimize(
     # ---- per-type compilers ----
 
     def compile_capacity(c: Constraint):
-        counts = slot_counts_for_group(c.args["group"])
+        counts = slot_counts_for_group(c.args["group"], selected_slots(c.args, k))
         lo = c.args.get("min")
         hi = c.args.get("max")
         if is_flexible(c):
             for index, expr in enumerate(counts):
-                if lo is not None:
-                    under = model.NewIntVar(0, max(0, int(lo)), f"{c.id}_under_{index}")
-                    model.Add(expr + under >= lo)
-                    slack_terms.append(under)
-                if hi is not None:
-                    over = model.NewIntVar(0, n, f"{c.id}_over_{index}")
-                    model.Add(expr - over <= hi)
-                    slack_terms.append(over)
+                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{index}"))
         elif c.hard:
             lit = enable_lit(c)
             for expr in counts:
@@ -262,6 +326,29 @@ def optimize(
                 return
             spread = add_spread_var(counts, c.id)
             objective_terms.append(-weight * spread)
+
+    def compile_load(c: Constraint):
+        slots = selected_slots(c.args, k)
+        lo = c.args.get("min")
+        hi = c.args.get("max")
+        loads = {e: sum(x[e, s] for s in slots) for e in group_members(c.args["group"])}
+        if is_flexible(c):
+            for e, expr in loads.items():
+                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{e}"))
+        elif c.hard:
+            lit = enable_lit(c)
+            for expr in loads.values():
+                if lo is not None:
+                    model.Add(expr >= lo).OnlyEnforceIf(lit)
+                if hi is not None:
+                    model.Add(expr <= hi).OnlyEnforceIf(lit)
+        else:
+            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
+            if weight <= 0:
+                return
+            objective_terms.append(
+                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{e}") for e, expr in loads.items())
+            )
 
     def compile_balance(c: Constraint):
         weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
@@ -305,8 +392,11 @@ def optimize(
             slack_terms.append(1 - get_same_slot_var(a, b))
         elif c.hard:
             lit = enable_lit(c)
-            for s in range(k):
-                model.Add(x[a, s] == x[b, s]).OnlyEnforceIf(lit)
+            if single:
+                for s in range(k):
+                    model.Add(x[a, s] == x[b, s]).OnlyEnforceIf(lit)
+            else:
+                model.Add(get_same_slot_var(a, b) == 1).OnlyEnforceIf(lit)
         else:
             weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
             objective_terms.append(weight * get_same_slot_var(a, b))
@@ -372,6 +462,7 @@ def optimize(
 
     COMPILERS = {
         "capacity": compile_capacity,
+        "load": compile_load,
         "balance": compile_balance,
         "separate": compile_separate,
         "together": compile_together,
@@ -388,15 +479,15 @@ def optimize(
 
     if anchor_assignment and anchor_weight > 0:
         objective_terms.append(anchor_weight * sum(
-            x[e, anchor_assignment[e]] for e in entities
-            if e in anchor_assignment and 0 <= anchor_assignment[e] < k
+            x[e, s] for e in entities for s in anchor_assignment.get(e, ()) if 0 <= s < k
         ))
 
     if hint_assignment:
         for e in entities:
-            if e in hint_assignment and 0 <= hint_assignment[e] < k:
+            if e in hint_assignment:
+                held = set(hint_assignment[e])
                 for s in range(k):
-                    model.AddHint(x[e, s], int(hint_assignment[e] == s))
+                    model.AddHint(x[e, s], int(s in held))
 
     if assumption_lits:
         model.AddAssumptions(assumption_lits)
@@ -452,10 +543,7 @@ def optimize(
     is_feasible = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
     if is_feasible:
         for e in entities:
-            for s in range(k):
-                if solver.Value(x[e, s]) == 1:
-                    assignment[e] = s
-                    break
+            assignment[e] = [s for s in range(k) if solver.Value(x[e, s]) == 1]
     else:
         if status == cp_model.INFEASIBLE and assumption_lits:
             try:

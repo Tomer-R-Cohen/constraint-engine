@@ -14,7 +14,7 @@ def test_verifier_reports_every_rule_and_assignment_integrity_independently():
         Constraint(type="balance", hard=False, args={"group": {"kind": "column", "column": "support"}, "weight": 1}, label="balance support"),
     ]
 
-    report = verify_assignment(df, {1: 0, 2: 0, 3: 1}, constraints, 2)
+    report = verify_assignment(df, {1: [0], 2: [0], 3: [1]}, constraints, 2)
 
     assert report.is_valid is False
     assert report.hard_rules_violated == 3  # integrity, capacity, separation
@@ -27,9 +27,9 @@ def test_verifier_reports_every_rule_and_assignment_integrity_independently():
 
 
 def test_slot_label_swaps_are_not_counted_as_meaningful_alternatives():
-    first = {1: 0, 2: 0, 3: 1, 4: 1}
-    relabeled = {1: 1, 2: 1, 3: 0, 4: 0}
-    changed = {1: 0, 2: 1, 3: 0, 4: 1}
+    first = {1: [0], 2: [0], 3: [1], 4: [1]}
+    relabeled = {1: [1], 2: [1], 3: [0], 4: [0]}
+    changed = {1: [0], 2: [1], 3: [0], 4: [1]}
 
     assert assignment_distance(first, relabeled, 2) == 0
     assert assignment_distance(first, changed, 2) == 2
@@ -110,7 +110,7 @@ def test_tight_capacity_portfolio_produces_distinct_verified_options():
 
 def test_verifier_covers_relationship_and_fixed_rules_and_ignores_met_soft_ones():
     df = pd.DataFrame(index=[1, 2, 3])
-    assignment = {1: 0, 2: 0, 3: 1}
+    assignment = {1: [0], 2: [0], 3: [1]}
     constraints = [
         Constraint(type="separate", hard=True, args={"entity_a": 1, "entity_b": 2}, label="apart"),
         Constraint(type="together", hard=True, args={"entity_a": 1, "entity_b": 3}, label="together"),
@@ -130,8 +130,8 @@ def test_verifier_covers_relationship_and_fixed_rules_and_ignores_met_soft_ones(
 def test_partner_requests_are_measured_per_requester():
     df = pd.DataFrame(index=[1, 2, 3])
     rule = Constraint(type="partner_requests", hard=False, label="requests", args={"requests": {1: [2, 3], 2: [1]}})
-    met = verify_assignment(df, {1: 0, 2: 0, 3: 0}, [rule], 2).checks[-1]
-    unmet = verify_assignment(df, {1: 0, 2: 1, 3: 1}, [rule], 2).checks[-1]
+    met = verify_assignment(df, {1: [0], 2: [0], 3: [0]}, [rule], 2).checks[-1]
+    unmet = verify_assignment(df, {1: [0], 2: [1], 3: [1]}, [rule], 2).checks[-1]
     assert (met.status, met.shortfall) == ("satisfied", 0)
     assert (unmet.status, unmet.shortfall, unmet.affected_entities) == ("violated", 2, [1, 2])
 

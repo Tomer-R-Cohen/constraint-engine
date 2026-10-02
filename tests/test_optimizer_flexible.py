@@ -19,7 +19,7 @@ def test_flexible_capacity_bends_by_the_minimum_amount():
     result = optimize(df, cfg, [cap], flexible_constraint_ids={cap.id})
 
     assert result.is_feasible
-    counts = sorted(sum(1 for e in range(1, 6) if result.assignment[e] == c) for c in range(2))
+    counts = sorted(sum(1 for e in range(1, 6) if result.assignment[e] == [c]) for c in range(2))
     assert counts == [2, 3]  # exactly one entity over, not the rule dropped
 
 
@@ -34,14 +34,14 @@ def test_flexible_rule_keeps_other_hard_rules_enforced():
 
     assert result.is_feasible
     assert result.assignment[1] == result.assignment[2]
-    assert sorted(list(result.assignment.values()).count(c) for c in range(2)) == [2, 2]
+    assert sorted(list(result.assignment.values()).count([c]) for c in range(2)) == [2, 2]
 
 
 def test_anchor_keeps_entities_in_place_when_nothing_else_matters():
     df = _df(6)
     size = Constraint(type="capacity", hard=True, label="three per slot",
                       args={"group": {"kind": "all"}, "min": 3, "max": 3})
-    anchor = {1: 1, 2: 0, 3: 1, 4: 0, 5: 1, 6: 0}
+    anchor = {1: [1], 2: [0], 3: [1], 4: [0], 5: [1], 6: [0]}
     result = optimize(df, SolverConfig(num_slots=2, time_limit_seconds=5), [size],
                       anchor_assignment=anchor, anchor_weight=1.0)
     assert result.assignment == anchor

@@ -54,11 +54,17 @@ def base_constraints(requests=None):
     ]
 
 
+def slot_of(result, e):
+    """The one slot an entity holds in a placement (one slot each)."""
+    (slot,) = result.assignment[e]
+    return slot
+
+
 def counts_per_slot(df, result, column):
     counts = [0, 0]
     for e, flagged in df[column].items():
         if flagged:
-            counts[result.assignment[e]] += 1
+            counts[slot_of(result, e)] += 1
     return counts
 
 
@@ -67,13 +73,13 @@ def test_all_entities_assigned_exactly_once():
     result = optimize(df, base_config(), base_constraints())
     assert result.is_feasible
     assert set(result.assignment) == set(df.index)
-    assert all(0 <= s < 2 for s in result.assignment.values())
+    assert all(slot_of(result, e) in (0, 1) for e in df.index)
 
 
 def test_slot_size_balanced():
     df = make_df()
     result = optimize(df, base_config(), base_constraints())
-    sizes = [list(result.assignment.values()).count(s) for s in range(2)]
+    sizes = [sum(slot_of(result, e) == s for e in df.index) for s in range(2)]
     assert abs(sizes[0] - sizes[1]) <= 1
 
 
@@ -100,7 +106,7 @@ def test_fixed_assignment_respected():
     constraints = base_constraints() + [Constraint(type="fixed", hard=True, label="1 in slot 2", args={"entity": 1, "slot": 1})]
     result = optimize(df, base_config(), constraints)
     assert result.is_feasible
-    assert result.assignment[1] == 1
+    assert result.assignment[1] == [1]
 
 
 def test_invalid_num_slots_raises():
@@ -154,7 +160,7 @@ def test_at_least_one_of_hard_satisfied():
     ]
     result = optimize(df, base_config(), constraints)
     assert result.is_feasible
-    assert result.assignment[10] in (result.assignment[11], result.assignment[12])
+    assert slot_of(result, 10) in (slot_of(result, 11), slot_of(result, 12))
 
 
 def test_string_entity_ids_work():
@@ -182,7 +188,7 @@ def test_balance_column_all_values_hard_forces_even_split_per_value():
     assert result.is_feasible
     counts = {"x": [0, 0], "y": [0, 0]}
     for e, category in df["category"].items():
-        counts[category][result.assignment[e]] += 1
+        counts[category][slot_of(result, e)] += 1
     assert counts == {"x": [2, 2], "y": [2, 2]}
 
 

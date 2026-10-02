@@ -23,6 +23,7 @@ from constraint_engine.constraints import (
     DEFAULT_WEIGHT_TWO,
     Constraint,
     resolve_group_members,
+    selected_slots,
     subgroups,
 )
 from constraint_engine.feasibility import analyze_feasibility
@@ -97,12 +98,15 @@ class CandidateOption:
 def slot_metrics(assignment: dict, num_slots: int) -> dict:
     """Rule-independent facts about an assignment."""
     sizes = [0] * num_slots
-    for slot in assignment.values():
-        if 0 <= slot < num_slots:
-            sizes[slot] += 1
+    for slots in assignment.values():
+        for slot in slots:
+            if 0 <= slot < num_slots:
+                sizes[slot] += 1
+    loads = [len(slots) for slots in assignment.values()]
     return {
         "slot_sizes": sizes,
         "slot_size_spread": (max(sizes) - min(sizes)) if sizes else 0,
+        "load_spread": (max(loads) - min(loads)) if loads else 0,
     }
 
 
@@ -111,34 +115,53 @@ def verify_assignment(
     assignment: dict,
     constraints: list[Constraint],
     num_slots: int,
+    slots_per_entity: tuple[int, int] = (1, 1),
 ) -> VerificationReport:
-    """Evaluate all active rules without using optimizer internals or status."""
+    """Evaluate all active rules without using optimizer internals or status.
+
+    `assignment` maps each entity to the list of slots it holds; an entity
+    missing from it holds none.
+    """
     expected_entities = df.index.tolist()
     expected_set = set(expected_entities)
-    assigned_set = set(assignment)
+    load_min, load_max = slots_per_entity
     checks: list[RuleCheck] = []
 
-    missing = [e for e in expected_entities if e not in assigned_set]
+    def holds(e) -> set:
+        return set(assignment.get(e, ()))
+
     unknown = [e for e in assignment if e not in expected_set]
-    out_of_range = [e for e, slot in assignment.items() if not isinstance(slot, int) or not 0 <= slot < num_slots]
-    structural_ok = not missing and not unknown and not out_of_range and num_slots > 0
+    out_of_range = [e for e, slots in assignment.items()
+                    if any(not isinstance(s, int) or not 0 <= s < num_slots for s in slots) or len(set(slots)) != len(slots)]
+    missing = [e for e in expected_entities if not holds(e) and load_min > 0]
+    wrong_count = [e for e in expected_entities if holds(e) and not load_min <= len(holds(e)) <= load_max]
+    structural_ok = not (missing or unknown or out_of_range or wrong_count) and num_slots > 0
     details = []
     if missing:
         details.append(text.INTEGRITY_MISSING.format(count=len(missing)))
+    if wrong_count:
+        details.append(text.INTEGRITY_WRONG_COUNT.format(count=len(wrong_count), min=load_min, max=load_max))
     if unknown:
         details.append(text.INTEGRITY_UNKNOWN.format(count=len(unknown)))
     if out_of_range:
         details.append(text.INTEGRITY_OUT_OF_RANGE.format(count=len(out_of_range)))
+    affected = missing + wrong_count + unknown + out_of_range
     checks.append(RuleCheck(
         constraint_id="assignment_integrity", label=text.INTEGRITY_LABEL, rule_type="integrity", hard=True,
         status="satisfied" if structural_ok else "violated",
         summary=text.INTEGRITY_OK if structural_ok else "; ".join(details),
-        expected={"entities": len(expected_set), "slots": num_slots}, actual={"assigned": len(assigned_set)},
-        shortfall=len(missing) + len(unknown) + len(out_of_range),
-        affected_entities=missing + unknown + out_of_range,
+        expected={"entities": len(expected_set), "slots": num_slots, "slots_per_entity": [load_min, load_max]},
+        actual={"assigned": sum(1 for e in expected_entities if holds(e))},
+        shortfall=len(affected), affected_entities=affected,
     ))
 
-    slot_members = [{e for e, slot in assignment.items() if slot == index} for index in range(max(0, num_slots))]
+    slot_members = [{e for e, slots in assignment.items() if index in slots} for index in range(max(0, num_slots))]
+
+    def shares(a, b) -> bool:
+        return bool(holds(a) & holds(b))
+
+    def slot_numbers(e) -> list[int]:
+        return [s + 1 for s in sorted(holds(e))]
 
     def add(con: Constraint, ok: bool, summary: str, *, expected=None, actual=None, shortfall=None,
             entities=None, slots=None, na=False):
@@ -156,37 +179,50 @@ def verify_assignment(
         args = con.args
         if con.type == "capacity":
             members = set(resolve_group_members(df, args["group"]))
-            counts = [len(members & group) for group in slot_members]
+            slots = selected_slots(args, num_slots)
+            counts = {s: len(members & slot_members[s]) for s in slots}
             lo, hi = args.get("min"), args.get("max")
-            outside = [max(0, (lo or 0) - count) + max(0, count - hi if hi is not None else 0) for count in counts]
-            bad = [index for index, units in enumerate(outside) if units]
+            outside = {s: max(0, (lo or 0) - count) + max(0, count - hi if hi is not None else 0)
+                       for s, count in counts.items()}
+            bad = [s for s, units in outside.items() if units]
             add(con, not bad, text.CAPACITY_OK if not bad else text.CAPACITY_BAD.format(count=len(bad)),
-                expected={"min": lo, "max": hi}, actual=counts, shortfall=sum(outside),
-                entities=[e for index in bad for e in slot_members[index] & members], slots=[index + 1 for index in bad])
+                expected={"min": lo, "max": hi}, actual={s + 1: count for s, count in counts.items()},
+                shortfall=sum(outside.values()),
+                entities=[e for s in bad for e in sorted(slot_members[s] & members, key=repr)], slots=[s + 1 for s in bad])
+        elif con.type == "load":
+            members = resolve_group_members(df, args["group"])
+            slots = set(selected_slots(args, num_slots))
+            lo, hi = args.get("min"), args.get("max")
+            loads = {e: len(holds(e) & slots) for e in members}
+            outside = {e: max(0, (lo or 0) - load) + max(0, load - hi if hi is not None else 0) for e, load in loads.items()}
+            bad = [e for e, units in outside.items() if units]
+            add(con, not bad, text.LOAD_OK if not bad else text.LOAD_BAD.format(count=len(bad)),
+                expected={"min": lo, "max": hi},
+                actual={"fewest": min(loads.values(), default=0), "most": max(loads.values(), default=0)},
+                shortfall=sum(outside.values()), entities=bad)
         elif con.type in ("separate", "together"):
             first, second = args["entity_a"], args["entity_b"]
-            applicable = first in expected_set and second in expected_set and first in assignment and second in assignment
-            same = applicable and assignment[first] == assignment[second]
+            applicable = first in expected_set and second in expected_set and bool(holds(first)) and bool(holds(second))
+            same = applicable and shares(first, second)
             ok = (not same) if con.type == "separate" else same
             add(con, ok, text.PAIR_OK if ok else text.PAIR_BAD,
                 expected=text.PAIR_DIFFERENT if con.type == "separate" else text.PAIR_SAME,
-                actual=[assignment[e] + 1 if e in assignment else None for e in (first, second)],
+                actual=[slot_numbers(e) for e in (first, second)],
                 entities=[first, second], na=not applicable)
         elif con.type == "at_least_one_of":
             entity = args["entity"]
             candidates = [e for e in args.get("candidates", []) if e in expected_set and e != entity]
-            applicable = entity in assignment and bool(candidates)
-            colocated = [e for e in candidates if assignment.get(e) == assignment.get(entity)]
+            applicable = entity in expected_set and bool(holds(entity)) and bool(candidates)
+            colocated = [e for e in candidates if shares(entity, e)]
             add(con, bool(colocated), text.AT_LEAST_ONE_OK if colocated else text.AT_LEAST_ONE_BAD,
                 expected=text.AT_LEAST_ONE_EXPECTED, actual=len(colocated), entities=[entity] + candidates,
                 na=not applicable)
         elif con.type == "fixed":
             entity, target = args["entity"], args["slot"]
-            applicable = entity in expected_set and entity in assignment
-            ok = applicable and assignment[entity] == target
+            applicable = entity in expected_set
+            ok = applicable and target in holds(entity)
             add(con, ok, text.FIXED_OK if ok else text.FIXED_BAD,
-                expected=target + 1, actual=(assignment.get(entity) + 1) if entity in assignment else None,
-                entities=[entity], na=not applicable)
+                expected=target + 1, actual=slot_numbers(entity), entities=[entity], na=not applicable)
         elif con.type == "balance":
             spreads, affected = [], []
             for subgroup in subgroups(df, args["group"]):
@@ -208,7 +244,7 @@ def verify_assignment(
             unmet = []
             for e in relevant:
                 requested = [other for other in requests.get(e, []) if other in expected_set and other != e]
-                same = [other for other in requested if assignment.get(other) == assignment.get(e)]
+                same = [other for other in requested if shares(e, other)]
                 mutual = [other for other in same if e in requests.get(other, [])]
                 mutual_hits += bool(mutual)
                 two_hits += len(same) >= 2
@@ -232,18 +268,30 @@ def verify_assignment(
     soft_ok = sum(not check.hard and check.status == "satisfied" for check in checks)
     valid = hard_bad == 0
     summary = text.VERIFY_VALID.format(ok=hard_ok) if valid else text.VERIFY_INVALID.format(bad=hard_bad, ok=hard_ok)
-    return VerificationReport(valid, summary, len(expected_set), len(expected_set & assigned_set),
+    entities_assigned = sum(1 for e in expected_entities if holds(e))
+    return VerificationReport(valid, summary, len(expected_set), entities_assigned,
                               hard_ok, hard_bad, soft_ok, soft_bad, checks)
 
 
-def assignment_distance(first: dict, second: dict, num_slots: int) -> int:
-    """Minimum moved entities after accounting for arbitrary slot labels."""
+def assignment_distance(first: dict, second: dict, num_slots: int, interchangeable: bool = True) -> int:
+    """How many entities hold different slots in the two assignments.
+
+    With interchangeable slots (one slot per entity), slot labels are
+    arbitrary: the count is the minimum over every renaming of slots.
+    """
     entities = [e for e in first if e in second]
+    unmatched = len(set(first) ^ set(second))
+    if not interchangeable:
+        return sum(set(first[e]) != set(second[e]) for e in entities) + unmatched
+    if any(len(first[e]) != 1 or len(second[e]) != 1 for e in entities):
+        raise ValueError(text.INTERCHANGEABLE_NEEDS_SINGLE_SLOT)
+    first = {e: first[e][0] for e in entities}
+    second = {e: second[e][0] for e in entities}
     if num_slots <= 8:
         best_same = 0
         for mapping in permutations(range(num_slots)):
             best_same = max(best_same, sum(mapping[first[e]] == second[e] for e in entities))
-        return len(entities) - best_same + len(set(first) ^ set(second))
+        return len(entities) - best_same + unmatched
     # Greedy fallback avoids factorial work for unusually large slot counts.
     pairs = sorted(((sum(first.get(e) == a and second.get(e) == b for e in entities), a, b)
                     for a in range(num_slots) for b in range(num_slots)), reverse=True)
@@ -251,7 +299,7 @@ def assignment_distance(first: dict, second: dict, num_slots: int) -> int:
     for count, a, b in pairs:
         if a not in used_a and b not in used_b:
             used_a.add(a); used_b.add(b); same += count
-    return len(entities) - same + len(set(first) ^ set(second))
+    return len(entities) - same + unmatched
 
 # A round always offers this many options: fewer reads as "the engine gave
 # up", more is more than a person can hold in mind at once.
@@ -263,7 +311,7 @@ STRATEGIES = list(text.STRATEGY_TITLES)
 
 # Soft rule types each emphasis pushes. Everything not listed is left alone.
 PREFERENCE_TYPES = {"partner_requests", "together", "separate", "at_least_one_of", "fixed"}
-BALANCE_TYPES = {"balance", "capacity"}
+BALANCE_TYPES = {"balance", "capacity", "load"}
 
 # A refinement pushes its emphasis harder than a fresh round (see
 # profile_constraints).
@@ -329,8 +377,8 @@ def describe_exceptions(report: VerificationReport) -> list[dict]:
     for check in report.checks:
         if not check.hard or check.status != "violated" or check.constraint_id == "assignment_integrity":
             continue
-        if check.rule_type == "capacity" and isinstance(check.actual, list) and check.affected_slots:
-            parts = ", ".join(text.SLOT_COUNT.format(slot=slot, count=check.actual[slot - 1]) for slot in check.affected_slots)
+        if check.rule_type == "capacity" and isinstance(check.actual, dict) and check.affected_slots:
+            parts = ", ".join(text.SLOT_COUNT.format(slot=slot, count=check.actual[slot]) for slot in check.affected_slots)
             description = text.EXCEPTION_DETAIL.format(label=check.label, parts=parts, range=_range_text(check.expected))
         else:
             description = text.EXCEPTION_SUMMARY.format(label=check.label, summary=check.summary)
@@ -346,13 +394,15 @@ def describe_exceptions(report: VerificationReport) -> list[dict]:
 
 def _candidate(option_id: str, title: str, strategy: str, result: OptimizationResult, df, original_constraints,
                cfg, relaxed_ids, first_assignment=None, reference=None) -> CandidateOption:
-    report = verify_assignment(df, result.assignment, original_constraints, cfg.num_slots)
+    report = verify_assignment(df, result.assignment, original_constraints, cfg.num_slots, cfg.slots_per_entity)
     metrics = slot_metrics(result.assignment, cfg.num_slots)
     compromises = [check.summary for check in report.checks if check.status == "violated"]
-    moved = sum(1 for e, slot in result.assignment.items() if reference.get(e) != slot) if reference else None
+    moved = (sum(1 for e, slots in result.assignment.items() if set(reference.get(e, ())) != set(slots))
+             if reference else None)
     return CandidateOption(option_id, title, strategy, result.assignment, report, metrics, compromises, list(relaxed_ids),
                            result.objective_value, result.wall_time_seconds,
-                           assignment_distance(first_assignment, result.assignment, cfg.num_slots) if first_assignment else 0,
+                           assignment_distance(first_assignment, result.assignment, cfg.num_slots, cfg.interchangeable)
+                           if first_assignment else 0,
                            exceptions=describe_exceptions(report), moved_from_reference=moved)
 
 
@@ -367,13 +417,15 @@ def rank_tradeoffs(options: list[CandidateOption]) -> None:
     strictly worst is a loss. Deterministic, so the agent only has to put
     these facts into words, never derive them.
 
-    Compared on: the gap between slot sizes, each soft rule's shortfall,
-    and (when refining) how many entities moved."""
+    Compared on: the gap between slot sizes, the gap between the most and
+    fewest slots any entity holds, each soft rule's shortfall, and (when
+    refining) how many entities moved."""
     if not options:
         return
     # (key, label, value per option); lower is better for every measure.
     measures: list[tuple[str, str, list]] = [
         ("slot_size_spread", text.METRIC_SLOT_SIZE_SPREAD, [option.metrics.get("slot_size_spread") for option in options]),
+        ("load_spread", text.METRIC_LOAD_SPREAD, [option.metrics.get("load_spread") for option in options]),
     ]
     first_checks = [check for check in options[0].verification.checks if not check.hard]
     for check in first_checks:
@@ -465,7 +517,8 @@ class PortfolioSearch:
         return cfg, result
 
     def _accept(self, title: str, strategy: str, cfg, result, relaxed) -> Optional[CandidateOption]:
-        if any(assignment_distance(option.assignment, result.assignment, cfg.num_slots) == 0 for option in self.options):
+        if any(assignment_distance(option.assignment, result.assignment, cfg.num_slots, cfg.interchangeable) == 0
+               for option in self.options):
             return None
         option = _candidate(f"option-{len(self.options) + 1}", title, strategy, result, self.df, self.constraints, cfg,
                             relaxed, self.options[0].assignment if self.options else None, self.reference)
@@ -492,7 +545,8 @@ class PortfolioSearch:
         # 6 slots at "at least 1") must bend in every option; no solve is
         # needed to know that, so none of the budget is spent proving it.
         forced_ids = {finding.constraint_id for finding in
-                      analyze_feasibility(self.df, self.constraints, self.config.num_slots).infeasible}
+                      analyze_feasibility(self.df, self.constraints, self.config.num_slots,
+                                          self.config.slots_per_entity).infeasible}
         forced = [con for con in hard if con.id in forced_ids]
         if forced:
             self.conflicts = [con.id for con in forced]

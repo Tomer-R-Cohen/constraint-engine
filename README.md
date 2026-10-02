@@ -20,8 +20,15 @@ CP-SAT and exposed to AI agents (e.g. Claude) as MCP tools.
 
 The solver core from Shibutzit is generalized: entities and slots instead
 of students and classes, rules over any spreadsheet column, English text in
-one module. Next: several slots per entity (rostering), the JSON problem
-spec, a growing rule catalog, then the MCP tools.
+one module. An entity can hold one slot (class placement) or several
+(shift rostering), set by `SolverConfig.slots_per_entity`.
+
+Rule types today: `capacity` (how many per slot), `load` (how many slots per
+entity), `balance`, `together` / `separate` / `at_least_one_of`, `fixed`,
+`partner_requests`. Every rule can be hard or soft.
+
+Next: the versioned JSON problem spec (named slots with attributes such as
+day and shift), a growing rule catalog, then the MCP tools.
 
 ## Setup
 

@@ -43,15 +43,18 @@ separately; this repo is a new product, not a branch of it.
 The solver core came from Shibutzit and is now domain-neutral: entities are
 the rows of a DataFrame (identified by its index), slots are numbered
 0..k-1, rules address spreadsheet columns by their header, and all
-user-facing text is English in `text.py`. Each entity still gets exactly
-one slot.
+user-facing text is English in `text.py`. An assignment maps each entity to
+the sorted list of slots it holds; `SolverConfig.slots_per_entity` sets how
+many — `(1, 1)` is placement (one slot each), a wider band is rostering.
+`slots_interchangeable` (auto: on only for one slot each) decides whether
+renaming slots gives the same answer.
 
 | Module | Role |
 |---|---|
-| `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity`, `balance`, `together`, `separate`, `at_least_one_of`, `fixed`, `partner_requests`. |
+| `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity` (per-slot band, optional slot subset), `load` (per-entity band of slots held, optional subset), `balance`, `together`/`separate`/`at_least_one_of` (share / never share a slot), `fixed`, `partner_requests`. |
 | `optimizer.py` | CP-SAT model. One assumption literal per hard rule → infeasibility traced to rule ids (note: `SufficientAssumptionsForInfeasibility` returns variable indices, not list positions). Flexible rules bent via slack; option diversity incl. slot-renaming symmetry; anchor/hints. |
 | `decision_support.py` | `verify_assignment` (independent rule checker, per-rule `shortfall`), `PortfolioSearch` (rounds of 3: perfect vs compromise), `rank_tradeoffs` (compares options by each soft rule's shortfall). |
-| `feasibility.py` | Pre-solve arithmetic checks for hard capacity rules. |
+| `feasibility.py` | Pre-solve arithmetic checks for hard capacity and load rules (counts slot places, using the load bands). |
 | `dataset_schema.py`, `excel_loader.py` | Spreadsheet loading, column-kind detection (flag/category/number), id column, entity table. |
 | `text.py` | Every user-facing string. |
 
@@ -60,8 +63,9 @@ one slot.
 1. ~~Copy core + tests from Shibutzit, get tests green.~~ Done.
 2. Generalize under the tests, keeping them green at every step:
    ~~student → entity, class → slot, fixed `FIELD_*` columns → column names
-   from the data, Hebrew labels → English~~ (done); allow several slots per
-   entity (needed for rostering).
+   from the data, Hebrew labels → English, several slots per entity~~
+   (done). Slots are still bare numbers; named slots with attributes
+   (day, shift) come with the spec.
 3. Define the problem spec: a versioned JSON document (XHSTT-style concepts —
    time slots, typed resources, demands, rules). Each rule: type, which
    entities it applies to, parameters, hard/soft, priority level.
