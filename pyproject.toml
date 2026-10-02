@@ -1,0 +1,22 @@
+[project]
+name = "constraint-engine"
+version = "0.1.0"
+description = "General assignment engine (rostering, timetabling, placement) on OR-Tools CP-SAT, exposed to AI agents as MCP tools."
+requires-python = ">=3.12"
+dependencies = [
+    "ortools",
+    "pandas",
+    "openpyxl",
+    "pydantic>=2",
+    "mcp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
