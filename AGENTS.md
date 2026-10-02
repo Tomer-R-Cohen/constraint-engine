@@ -38,7 +38,11 @@ separately; this repo is a new product, not a branch of it.
 5. **English first.** All user-facing text (rule read-backs, explanations,
    tool descriptions) lives in one place so a locale can be added later.
    No Hebrew/RTL work unless asked.
-6. **Reproducible.** Fixed seed; store solutions rather than relying on
+6. **General, never specific.** The engine stays general: no features,
+   rule types, wording or displays shaped around one domain or one sample
+   problem. Only mechanisms that work the same for any assignment problem.
+   A test run is not a reason to add a special case.
+7. **Reproducible.** Fixed seed; store solutions rather than relying on
    re-solving to get the same answer.
 
 ## Architecture (target)
