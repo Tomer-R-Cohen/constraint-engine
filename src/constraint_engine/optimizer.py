@@ -188,7 +188,7 @@ def optimize(
         held_before = {e: {s for s in previous[e] if 0 <= s < k} for e in entities if e in previous}
         if single:
             # One slot each: an entity moved iff it left its old slot.
-            stays = [x[e, s] for held in held_before.values() for s in held]
+            stays = [x[e, s] for e, held in held_before.items() for s in held]
             if stays:
                 model.Add(sum(stays) <= len(stays) - min(minimum_distance, len(stays)))
         else:

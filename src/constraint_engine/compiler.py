@@ -25,8 +25,9 @@ from constraint_engine.constraints import DEFAULT_WEIGHT, Constraint, resolve_gr
 from constraint_engine.dataset_schema import describe_columns, prepare_entities
 from constraint_engine.decision_support import generate_portfolio, negotiation_question
 from constraint_engine.optimizer import SolverConfig
-from constraint_engine.readback import describe_rule
+from constraint_engine.readback import describe_rule_body
 from constraint_engine.spec import (
+    Attributes,
     CountRule,
     EntitySelector,
     PerAttribute,
@@ -36,6 +37,7 @@ from constraint_engine.spec import (
     SlotSelector,
     StretchRule,
     TransitionRule,
+    attribute_names,
     data_hash,
     spec_hash,
 )
@@ -179,18 +181,30 @@ class _Compiler:
             return chosen
         return None
 
-    def per_groups(self, rule_id: str, attribute: str, chosen: Optional[list[int]]) -> list[list[int]]:
-        if attribute not in self.attributes:
-            self.problem(rule_id, text.SPEC_UNKNOWN_ATTRIBUTE.format(attribute=attribute, attributes=_join(self.attributes) or "-"))
+    def per_groups(self, rule_id: str, attribute: Attributes, chosen: Optional[list[int]]) -> list[list[int]]:
+        """Slot indexes grouped by the value(s) of one or more attributes,
+        groups in slot-list order."""
+        names = attribute_names(attribute)
+        unknown = [a for a in names if a not in self.attributes]
+        if unknown:
+            for a in unknown:
+                self.problem(rule_id, text.SPEC_UNKNOWN_ATTRIBUTE.format(attribute=a, attributes=_join(self.attributes) or "-"))
             return []
         groups: dict[Any, list[int]] = {}
         for i in (range(len(self.spec.slots)) if chosen is None else chosen):
             slot = self.spec.slots[i]
-            if attribute not in slot.attributes:
-                self.problem(rule_id, text.SPEC_SLOT_MISSING_ATTRIBUTE.format(slot=slot.id, attribute=attribute))
+            missing = [a for a in names if a not in slot.attributes]
+            if missing:
+                self.problem(rule_id, text.SPEC_SLOT_MISSING_ATTRIBUTE.format(slot=slot.id, attribute=missing[0]))
                 continue
-            groups.setdefault(slot.attributes[attribute], []).append(i)
+            groups.setdefault(tuple(slot.attributes[a] for a in names), []).append(i)
         return list(groups.values())
+
+    def group_label(self, attribute: Attributes, group: list[int]) -> str:
+        if not group:
+            return ""
+        slot = self.spec.slots[group[0]]
+        return " ".join(f"{a} {slot.attributes.get(a)}" for a in attribute_names(attribute))
 
     # ---- rules ----
 
@@ -202,7 +216,8 @@ class _Compiler:
         ok = all([self.column(rule_id, c, flag=True) for c in per_item.flag_columns])
         return {"columns": list(per_item.flag_columns)} if ok else None
 
-    def units(self, rule_id: str, per: str, keep: Optional[list[int]], within_each: Optional[str] = None):
+    def units(self, rule_id: str, per: Attributes, keep: Optional[list[int]],
+              within_each: Optional[Attributes] = None):
         """Time units in slot-list order, each the slots of one value of
         `per` (restricted to `keep`); one sequence, or one per value of
         `within_each`."""
@@ -210,14 +225,8 @@ class _Compiler:
             return [[[s for s in unit if keep is None or s in keep] for unit in self.per_groups(rule_id, per, None)]]
         sequences = []
         for outer in self.per_groups(rule_id, within_each, None):
-            inner: dict[Any, list[int]] = {}
-            for i in outer:
-                slot = self.spec.slots[i]
-                if per not in slot.attributes:
-                    self.problem(rule_id, text.SPEC_SLOT_MISSING_ATTRIBUTE.format(slot=slot.id, attribute=per))
-                    continue
-                inner.setdefault(slot.attributes[per], []).append(i)
-            sequences.append([[s for s in unit if keep is None or s in keep] for unit in inner.values()])
+            inner = self.per_groups(rule_id, per, outer)
+            sequences.append([[s for s in unit if keep is None or s in keep] for unit in inner])
         return sequences
 
     def weights(self, rule_id: str, rule: CountRule, group: Optional[dict]):
@@ -259,9 +268,7 @@ class _Compiler:
                 attribute = rule.per_slot.attribute
                 groups = self.per_groups(rid, attribute, chosen)
                 args["slot_groups"] = groups
-                args["slot_group_labels"] = [
-                    f"{attribute} {self.spec.slots[g[0]].attributes.get(attribute)}" if g else "" for g in groups
-                ]
+                args["slot_group_labels"] = [self.group_label(attribute, g) for g in groups]
             else:
                 args["slot_groups"] = rule.per_slot
                 if chosen is not None:
@@ -318,7 +325,7 @@ class _Compiler:
             return None
         if rule.mode == "soft":
             args["weight"] = DEFAULT_WEIGHT[rule.type] * PRIORITY_FACTOR[rule.level]
-        return Constraint(type=rule.type, hard=rule.mode == "hard", args=args, label=describe_rule(rule, self.spec),
+        return Constraint(type=rule.type, hard=rule.mode == "hard", args=args, label=describe_rule_body(rule, self.spec),
                           source="chat", active=rule.active, id=rule.id)
 
 
@@ -340,10 +347,16 @@ def compile_spec(spec: ProblemSpec, df: pd.DataFrame) -> CompiledProblem:
     if compiler.problems:
         raise SpecError(compiler.problems)
     slot_ids = [slot.id for slot in spec.slots]
+    interchangeable = spec.settings.slots_interchangeable
+    if interchangeable is None:
+        # Unlabeled groups (class 7A, 7B: one attribute or none) are
+        # interchangeable; slots described by several attributes (day x
+        # period x room) are distinct things.
+        interchangeable = (lo, hi) == (1, 1) and all(len(slot.attributes) <= 1 for slot in spec.slots)
     config = SolverConfig(
         num_slots=len(slot_ids),
         slots_per_entity=(lo, hi),
-        slots_interchangeable=spec.settings.slots_interchangeable,
+        slots_interchangeable=interchangeable,
         slot_names=slot_ids,
         time_limit_seconds=spec.settings.time_limit_seconds,
         random_seed=spec.settings.seed,

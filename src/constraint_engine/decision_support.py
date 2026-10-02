@@ -394,6 +394,8 @@ def _range_text(expected: Any) -> str:
     if not isinstance(expected, dict):
         return str(expected)
     lo, hi = expected.get("min"), expected.get("max")
+    lo = None if lo is None else _number(lo)
+    hi = None if hi is None else _number(hi)
     if lo is not None and hi is not None:
         return f"{lo}" if lo == hi else f"{lo}–{hi}"
     if hi is not None:
@@ -466,13 +468,16 @@ def rank_tradeoffs(options: list[CandidateOption]) -> None:
         for option in options:
             match = next((c for c in option.verification.checks if c.constraint_id == check.constraint_id), None)
             values.append(None if match is None or match.status == "not_applicable" else match.shortfall)
-        measures.append((check.constraint_id, text.METRIC_RULE_SHORTFALL.format(label=check.label), values))
+        measures.append((check.constraint_id, check.label.rstrip("."), values))
     if any(option.moved_from_reference is not None for option in options):
         measures.append(("moved_from_reference", text.METRIC_MOVED, [option.moved_from_reference for option in options]))
 
     for option in options:
         option.scores, option.gains, option.losses = {}, [], []
+    rule_ids = {check.constraint_id for check in first_checks}
     for key, label, values in measures:
+        best_text, worst_text = ((text.TRADEOFF_BEST_RULE, text.TRADEOFF_WORST_RULE) if key in rule_ids
+                                 else (text.TRADEOFF_BEST, text.TRADEOFF_WORST))
         if any(value is None for value in values):
             continue
         best, worst = min(values), max(values)
@@ -480,10 +485,10 @@ def rank_tradeoffs(options: list[CandidateOption]) -> None:
             rank = "mid"
             if best != worst and value == best and values.count(best) == 1:
                 rank = "best"
-                option.gains.append(text.TRADEOFF_BEST.format(label=label, value=_format(value)))
+                option.gains.append(best_text.format(label=label, value=_format(value)))
             elif best != worst and value == worst and values.count(worst) == 1:
                 rank = "worst"
-                option.losses.append(text.TRADEOFF_WORST.format(label=label, value=_format(value)))
+                option.losses.append(worst_text.format(label=label, value=_format(value)))
             option.scores[key] = {"label": label, "value": value, "rank": rank, "higher_is_better": False}
     for option in options:
         option.losses = [item["text"] for item in option.exceptions] + option.losses

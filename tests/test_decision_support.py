@@ -153,3 +153,27 @@ def test_tradeoffs_compare_soft_rules_by_shortfall():
     assert shortfalls == [0, 1, 1]
     best = next(option for option in options if option.scores[together_id]["rank"] == "best")
     assert any("1 with 2" in gain for gain in best.gains)
+
+
+def test_options_differ_by_the_minimum_distance_when_slots_are_distinct():
+    # One slot each, slots NOT interchangeable (a timetable): later options
+    # must still be genuinely different, by at least the minimum distance.
+    # (Regression: the exclusion once constrained only the last item.)
+    df = pd.DataFrame(index=[f"lesson{i}" for i in range(6)])
+    cfg = SolverConfig(num_slots=6, slots_interchangeable=False, time_limit_seconds=5)
+    options, _ = generate_portfolio(df, cfg, [per_slot("one per period", max=1)], max_options=3)
+    assert len(options) == 3
+    for i, a in enumerate(options):
+        for b in options[i + 1:]:
+            assert assignment_distance(a.assignment, b.assignment, 6, interchangeable=False) >= 1
+
+
+def test_excluded_answer_is_never_returned_again():
+    from constraint_engine.optimizer import optimize
+    df = pd.DataFrame(index=["a", "b", "c", "d"])
+    cfg = SolverConfig(num_slots=4, slots_interchangeable=False, time_limit_seconds=5)
+    rules = [per_slot("one each", max=1)]
+    first = optimize(df, cfg, rules)
+    second = optimize(df, cfg, rules, excluded_assignments=[first.assignment], min_assignment_distance=3)
+    moved = sum(first.assignment[e] != second.assignment[e] for e in df.index)
+    assert moved >= 3

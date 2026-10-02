@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from constraint_engine.compiler import SpecError, check_spec, compile_spec, entity_table, solve_spec
 from constraint_engine.optimizer import optimize
-from constraint_engine.readback import describe_rule, describe_spec
+from constraint_engine.readback import describe_rule, describe_rule_body, describe_spec
 from constraint_engine.spec import data_hash, dump_spec, load_spec, spec_hash
 
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -187,7 +187,10 @@ def test_each_spec_rule_becomes_one_engine_rule_with_its_id_and_read_back():
     spec, df = staff()
     problem = compile_spec(spec, df)
     assert [c.id for c in problem.constraints] == [r.id for r in spec.rules]
-    assert [c.label for c in problem.constraints] == [describe_rule(r, spec) for r in spec.rules]
+    # Engine labels are the rule text without its status, for use inside
+    # exceptions and trade-offs; the full read-back adds the status.
+    assert [c.label for c in problem.constraints] == [describe_rule_body(r, spec) for r in spec.rules]
+    assert all(describe_rule(r, spec).startswith(describe_rule_body(r, spec)) for r in spec.rules)
     by_id = {c.id: c for c in problem.constraints}
     assert by_id["daily"].args["slot_groups"] == [[2 * d, 2 * d + 1] for d in range(7)]
     assert by_id["daily"].args["slot_group_labels"][0] == "day Mon"

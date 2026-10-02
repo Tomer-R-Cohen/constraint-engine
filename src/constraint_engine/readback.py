@@ -20,6 +20,7 @@ from constraint_engine.spec import (
     SlotSelector,
     StretchRule,
     TransitionRule,
+    unit_name,
 )
 
 
@@ -167,15 +168,17 @@ def _count_band(rule: CountRule, spec: ProblemSpec) -> str:
         slot_filter_used = True
     elif isinstance(rule.per_slot, PerAttribute):
         if subject is None:
-            subject = text.SUBJECT_EVERY_GROUP.format(attribute=rule.per_slot.attribute)
+            subject = text.SUBJECT_EVERY_GROUP.format(attribute=unit_name(rule.per_slot.attribute))
         else:
-            tail += text.PER.format(attribute=rule.per_slot.attribute)
+            tail += text.PER.format(attribute=unit_name(rule.per_slot.attribute))
     if slot_filter and not slot_filter_used:
         tail += text.ACROSS.format(slots=v.slots, filter=slot_filter)
     if item_filter and not item_filter_used:
         tail += text.COUNTING_ITEMS.format(entities=v.entities, filter=item_filter)
 
     if subject is None:
+        if not rule.min and rule.max == 0 and rule.sum is None:
+            return text.RB_COUNT_NONE.format(entity=v.entity, filter=item_filter, slot=v.slot, slot_filter=slot_filter)
         return text.RB_COUNT_TOTAL.format(band=words, noun=noun, tail=tail)
     if scope:
         return text.RB_COUNT_SCOPED.format(scope=scope, subject=subject, band=words, noun=noun, tail=tail)
@@ -189,7 +192,7 @@ def _count_even(rule: CountRule, spec: ProblemSpec) -> str:
     measured = rule.sum.item_column or rule.sum.slot_attribute if rule.sum is not None else None
     if rule.even == "slots":
         if isinstance(rule.per_slot, PerAttribute):
-            across = text.EVEN_ACROSS_GROUPS.format(units=_plural(rule.per_slot.attribute))
+            across = text.EVEN_ACROSS_GROUPS.format(units=_plural(unit_name(rule.per_slot.attribute)))
         else:
             across = text.EVEN_ACROSS_SLOTS.format(slots=v.slots, filter=slot_filter)
         if rule.per_item == "each":
@@ -207,7 +210,7 @@ def _count_even(rule: CountRule, spec: ProblemSpec) -> str:
     if rule.per_slot == "each":
         scope = text.IN_EVERY_SLOT.format(slot=v.slot)
     elif isinstance(rule.per_slot, PerAttribute):
-        scope = text.PER.format(attribute=rule.per_slot.attribute)
+        scope = text.PER.format(attribute=unit_name(rule.per_slot.attribute))
     else:
         scope = ""
     return text.RB_EVEN_SIMILAR.format(who=who, amount=amount, scope=scope, gap=gap)
@@ -255,16 +258,24 @@ def _stretch(rule: StretchRule, spec: ProblemSpec) -> str:
         edge = text.STRETCH_IGNORE_EDGES
     else:
         edge = text.STRETCH_EDGE if rule.min else ""
-    within = text.STRETCH_WITHIN.format(attribute=rule.within_each) if rule.within_each else ""
+    within = text.STRETCH_WITHIN.format(attribute=unit_name(rule.within_each)) if rule.within_each else ""
+    unit = unit_name(rule.per)
+    if rule.of == "off" and rule.ignore_edges and not rule.min and rule.max is not None:
+        subject = _item_subject(rule.items, rule.per_item, spec)
+        if rule.max == 0:
+            return text.RB_STRETCH_NO_GAPS.format(subject=subject, units=_plural(unit), within=within, counting=counting)
+        return text.RB_STRETCH_GAPS.format(subject=subject, n=rule.max, unit=unit if rule.max == 1 else _plural(unit),
+                                           units=_plural(unit), within=within, counting=counting)
     template = text.RB_STRETCH_WORK if rule.of == "work" else text.RB_STRETCH_OFF
     return template.format(subject=_item_subject(rule.items, rule.per_item, spec), band=words,
-                           unit=rule.per if one else _plural(rule.per), units=_plural(rule.per),
+                           unit=unit if one else _plural(unit), units=_plural(unit),
                            within=within, counting=counting, edge=edge)
 
 
 def _transition(rule: TransitionRule, spec: ProblemSpec) -> str:
-    window = (text.WINDOW_NEXT.format(unit=rule.per) if rule.next == 1
-              else text.WINDOW_NEXT_N.format(n=rule.next, units=_plural(rule.per)))
+    unit = unit_name(rule.per)
+    window = (text.WINDOW_NEXT.format(unit=unit) if rule.next == 1
+              else text.WINDOW_NEXT_N.format(n=rule.next, units=_plural(unit)))
     return text.RB_TRANSITION.format(subject=_item_subject(rule.items, rule.per_item, spec),
                                      slot=spec.vocabulary.slot, after=_slot_filter(rule.after),
                                      forbid=_slot_filter(rule.not_followed_by), window=window)
@@ -272,6 +283,12 @@ def _transition(rule: TransitionRule, spec: ProblemSpec) -> str:
 
 def describe_rule(rule, spec: ProblemSpec) -> str:
     """One rule in plain English, ending with whether it is mandatory."""
+    return f"{describe_rule_body(rule, spec)} {_status(rule)}"
+
+
+def describe_rule_body(rule, spec: ProblemSpec) -> str:
+    """What the rule says, without "Mandatory." / "Preference, ...": the
+    form used inside other sentences (exceptions, trade-offs)."""
     if isinstance(rule, CountRule):
         body = _count(rule, spec)
     elif isinstance(rule, ShareRule):
@@ -282,7 +299,7 @@ def describe_rule(rule, spec: ProblemSpec) -> str:
         body = _transition(rule, spec)
     else:  # pragma: no cover - the spec's union is closed
         raise TypeError(f"no read-back for {type(rule).__name__}")
-    return f"{_sentence(body)} {_status(rule)}"
+    return _sentence(body)
 
 
 def describe_settings(spec: ProblemSpec) -> str:

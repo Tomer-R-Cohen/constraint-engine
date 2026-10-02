@@ -154,10 +154,25 @@ class PerColumn(_Model):
         return self
 
 
-class PerAttribute(_Model):
-    """Group slots by an attribute: one group per value (e.g. per day)."""
+# One slot attribute, or several read together: ["week", "day"] makes one
+# group per (week, day) pair -- "per day" across a schedule of several weeks.
+Attributes = Union[str, list[str]]
 
-    attribute: str
+
+def attribute_names(value: Attributes) -> list[str]:
+    return [value] if isinstance(value, str) else list(value)
+
+
+def unit_name(value: Attributes) -> str:
+    """What one group is called in a read-back: the last attribute (day)."""
+    return attribute_names(value)[-1]
+
+
+class PerAttribute(_Model):
+    """Group slots by an attribute: one group per value (e.g. per day), or
+    by several attributes at once (["week", "day"])."""
+
+    attribute: Attributes
 
 
 class SumOf(_Model):
@@ -244,8 +259,8 @@ class StretchRule(_RuleBase, _Band):
     items: EntitySelector = Field(default_factory=EntitySelector)
     per_item: Union[Literal["each"], PerColumn] = "each"
     slots: SlotSelector = Field(default_factory=SlotSelector)
-    per: str
-    within_each: Optional[str] = None
+    per: Attributes
+    within_each: Optional[Attributes] = None
     of: Literal["work", "off"] = "work"
     ignore_edges: bool = False
 
@@ -265,7 +280,7 @@ class TransitionRule(_RuleBase):
     per_item: Union[Literal["each"], PerColumn] = "each"
     after: SlotSelector
     not_followed_by: SlotSelector
-    per: str
+    per: Attributes
     next: int = Field(default=1, ge=1)
 
 
