@@ -6,9 +6,12 @@ Guidance for AI coding agents working in this repository.
 
 A general constraint optimization engine for assignment problems — employee
 shift rostering, teacher timetabling, student class placement, and the rest
-of that family — built on Google OR-Tools CP-SAT. It will be exposed to AI agents (e.g. Claude Desktop) as
-MCP tools: the user uploads a spreadsheet and describes rules in chat, the
-agent translates those into tool calls, and the engine solves.
+of that family — built on Google OR-Tools CP-SAT. It is exposed as an MCP
+server usable by **any** MCP client and any model (no vendor is assumed
+anywhere): the user gives a spreadsheet and describes rules in chat, the
+agent translates those into tool calls, and the engine solves. The logic
+lives in `workspace.py`, so other front ends (HTTP API, UI) can sit on it
+the same way.
 
 It is a fork of **Shibutzit** (`D:\projects\shibutzit`), a Hebrew web app
 for placing 7th-grade students into classes. That app keeps living
@@ -114,7 +117,9 @@ weight.
 | `spec.py` | `ProblemSpec` (Pydantic, versioned JSON): slots, vocabulary, item source, settings, rules (`count`, `share`, `stretch`, `transition`); item/slot selectors; `spec_hash`, `data_hash`. |
 | `compiler.py` | `compile_spec` (checks every column/value/item/slot/attribute reference, reports all problems at once as `SpecError`; priority → weight), `entity_table`, `solve_spec` (a round in slot ids, stamped with hashes, engine version, seed). |
 | `readback.py` | `describe_rule` / `describe_spec`: read-backs assembled from templates in `text.py`. |
-| `text.py` | Every user-facing string, including read-back templates and spec errors. |
+| `workspace.py` | `Workspace`: problems built step by step (load data → slots → rules → solve rounds → look up / export), every round stored with its fingerprints. Client-neutral; all tools call into it. |
+| `server.py` | MCP server (`MCPServer` from `mcp` 2.x) exposing the workspace as 12 tools; stdio or streamable HTTP; `constraint-engine-mcp` entry point. Tool descriptions and server instructions come from `text.py` and must stay vendor-neutral (a test checks). |
+| `text.py` | Every user-facing string, including read-back templates, spec errors, tool descriptions and server instructions. |
 
 ## Plan
 
@@ -134,9 +139,12 @@ weight.
    counting "days worked" rather than slots (weekends worked), rule
    bundles (contracts). `slots_per_entity` stays a setting: it is
    structural (decides one-slot placement and slot interchangeability).
-5. MCP server on top: `load_data`, `add_rule` (returns read-back),
-   `list_rules`/`remove_rule`, `solve` (3 options), `explain_conflict`,
-   `why(entity)`, `export`.
+5. ~~MCP server~~ Done: `load_data`, `describe_data`, `set_slots`,
+   `add_rule` (returns read-back), `remove_rule`, `set_rule_active`,
+   `list_rules`, `solve` (3 options; conflicts and exceptions with
+   read-backs; refine), `get_option` (whole / one item and its rules / one
+   slot), `export_option`, `get_spec`/`set_spec`. Not yet: persisting
+   problems and rounds across server restarts.
 6. Test with three examples: a shift roster, a teacher timetable, and the
    Shibutzit class-placement sample data.
 

@@ -2,7 +2,8 @@
 
 A general engine for "assign X to Y" problems — employee shift rostering,
 teacher timetabling, student class placement — built on Google OR-Tools
-CP-SAT and exposed to AI agents (e.g. Claude) as MCP tools.
+CP-SAT and exposed as an MCP server that works with any MCP client and any
+model.
 
 ## Principles
 
@@ -37,7 +38,8 @@ A problem is a versioned JSON **spec**, checked against the data before
 solving. A solve returns 3 genuinely different options, each verified by an
 independent checker, in slot names, stamped with spec and data hashes.
 
-Next: the MCP server, so an AI agent can load a sheet, add rules and solve.
+Next: persisting problems across server restarts, and three worked
+examples (a shift roster, a teacher timetable, a class placement).
 
 ## Example spec
 
@@ -64,6 +66,25 @@ Read back as:
 - Every shift where shift is night has exactly 1 employee. Mandatory.
 - Each employee has at most 1 shift per day. Mandatory.
 - Ana and Ben share at least one shift. Preference, high priority.
+
+## Running the MCP server
+
+```
+constraint-engine-mcp                                         # stdio, for local clients
+constraint-engine-mcp --transport streamable-http --port 8000  # HTTP, at /mcp
+```
+
+Most MCP hosts take a server entry like this (adjust the path to your venv):
+
+```json
+{"mcpServers": {"constraint-engine": {"command": "D:/projects/constraint-engine/.venv/Scripts/constraint-engine-mcp.exe"}}}
+```
+
+Tools: `load_data`, `describe_data`, `set_slots`, `add_rule`, `remove_rule`,
+`set_rule_active`, `list_rules`, `solve`, `get_option`, `export_option`,
+`get_spec`, `set_spec`. The server's instructions tell any agent to read
+each rule back to the user, to quote numbers only from tool results, and
+never to change or relax a rule on its own.
 
 ## Setup
 

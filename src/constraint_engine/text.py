@@ -185,3 +185,94 @@ SPEC_SLOT_MISSING_ATTRIBUTE = "slot '{slot}' has no '{attribute}' attribute."
 SPEC_SAME_ENTITY_TWICE = "'{entity}' is named twice; the rule needs two different entities."
 SPEC_DUPLICATE_ENTITIES = "The entity table has duplicate ids."
 SPEC_TOO_MANY_SLOTS_PER_ENTITY = "slots_per_entity allows {max} slots each, but there are only {count} slots."
+
+# ---- workspace ----
+WS_NO_SLOTS = "This problem has no slots yet; set them first."
+WS_UNSUPPORTED_FILE = "Unsupported file type '{extension}'. Use .csv or .xlsx."
+WS_UNKNOWN_PROBLEM = "There is no problem '{problem}'. Problems: {known}."
+WS_SLOTS_OR_GRID = "Give either 'slots' (a list) or 'grid' (attribute values to combine), not both."
+WS_DUPLICATE_RULE = "There is already a rule '{rule}'."
+WS_UNKNOWN_RULE = "There is no rule '{rule}'. Rules: {known}."
+WS_UNKNOWN_OPTION = "There is no option '{option}'. Options: {known}."
+EXPORT_ASSIGNED = "Assigned"
+EXPORT_SLOT = "Slot"
+EXPORT_COUNT = "Count"
+EXPORT_ITEMS = "Items"
+EXPORT_SHEET_ITEMS = "By item"
+EXPORT_SHEET_SLOTS = "By slot"
+
+# ---- MCP server (read by any MCP client and any model) ----
+SERVER_NAME = "constraint-engine"
+SERVER_INSTRUCTIONS = """\
+An assignment solver: it places items (the rows of a data file: students,
+employees, lessons...) into slots (classes, shifts, time+room cells...)
+under rules, and returns three verified options per solve.
+
+Workflow: load_data -> set_slots -> add_rule (one per rule the user states)
+-> list_rules -> solve -> get_option / export_option.
+
+How to work with the user:
+- Translate each rule the user states into one add_rule call. Show the user
+  the returned read_back word for word and let them confirm or correct it.
+- Never invent numbers or facts about a solution: quote tool results only.
+- The rules belong to the user. Never add, change, relax, switch off or drop
+  a rule unless the user asks for that change.
+- When rules cannot all hold, say which rules conflict (conflicting_rules)
+  and what each option breaks (exceptions), and let the user choose. Do not
+  recommend changing a rule.
+- Present every option of a round, with what each does better and worse.
+"""
+TOOL_LOAD_DATA = (
+    "Load a data file (.csv or .xlsx) whose rows are the items to place. Returns a problem_id, the item count, "
+    "the id column (guessed when not given) and each usable column with its kind (flag = yes/no, category, "
+    "number) and values. header_row is the 1-based row holding the column names."
+)
+TOOL_DESCRIBE_DATA = "Describe a loaded problem's items and columns again."
+TOOL_SET_SLOTS = (
+    "Define the slots items are placed into. Either 'slots' (a list of {id, attributes}) or 'grid' (attribute "
+    "-> list of values; every combination becomes a slot, e.g. {\"day\": [\"Mon\", \"Tue\"], \"shift\": "
+    "[\"morning\", \"night\"]} gives Mon-morning, Mon-night, ...). List slots in time order: rules over time "
+    "follow it. slots_per_item is [min, max] slots each item holds ([1, 1] = each item in exactly one slot, the "
+    "default; a roster uses e.g. [0, 14]). vocabulary sets the words read-backs use (employee/shift, "
+    "student/class)."
+)
+TOOL_ADD_RULE = (
+    "Add one rule. It is checked against the data (columns, values, item ids, slot ids and attributes) and "
+    "returned as a plain-English read_back to show the user. Every rule is mandatory (mode 'hard') or a "
+    "preference (mode 'soft' with priority low/medium/high). Four rule types:\n"
+    "- count: count placements per group and keep each within min..max, or 'even'. per_item: 'all', 'each', "
+    "{column} (one group per value) or {flag_columns}; per_slot: 'all', 'each' or {attribute} (e.g. per day). "
+    "Optional 'sum' adds up an item column or slot attribute (hours, size) instead of counting. Examples: "
+    "class size 25-28 = per_item all, per_slot each, min 25, max 28; 3-6 shifts each = per_item each, "
+    "per_slot all; one shift a day = per_item each, per_slot {attribute: day}, max 1; Ana fixed to mon-am = "
+    "items {members: [Ana]}, slots {ids: [mon-am]}, per_item each, per_slot all, min 1; no teacher in two "
+    "places = per_item {column: Teacher}, per_slot {attribute: time}, max 1; spread schools evenly = "
+    "per_item {column: School}, per_slot each, even 'slots'; fair shifts = per_item each, per_slot all, "
+    "even 'items'.\n"
+    "- share: an item shares a slot with min..max of a list ('item' + 'with'), or every item with the items "
+    "named in a column ('with_column'). Together = min 1; apart = max 0.\n"
+    "- stretch: lengths of worked (of 'work') or free (of 'off') stretches of time units made by the slot "
+    "attribute 'per' (e.g. at most 5 days in a row; days off at least 2 together). within_each restarts per "
+    "value (periods within each day); ignore_edges skips time before the first and after the last (gaps).\n"
+    "- transition: after a slot matching 'after', no slot matching 'not_followed_by' in the next 'next' units "
+    "of 'per' (no morning after a night).\n"
+    "Selectors: items {} | {column} (flag is yes) | {column, value} | {members}; slots {} | {ids} | "
+    "{where: {attribute: value or [values]}}."
+)
+TOOL_REMOVE_RULE = "Remove a rule (only when the user asks). Returns the read-back of what was removed."
+TOOL_SET_RULE_ACTIVE = "Switch a rule off or back on without deleting it (only when the user asks)."
+TOOL_LIST_RULES = "Every rule of the problem with its id and read-back, plus the slots-per-item setting."
+TOOL_SOLVE = (
+    "Solve: returns a round of up to 3 genuinely different options. mode 'perfect' = every option meets every "
+    "mandatory rule; 'compromise' = they cannot all hold, conflicting_rules says which clash and each option's "
+    "exceptions say exactly what it breaks. Each option lists what it does better and worse than the others. "
+    "refine_option re-solves near an earlier option (the three results change little, more, freely); emphasis "
+    "'preferences' or 'balance' tilts the soft rules."
+)
+TOOL_GET_OPTION = (
+    "An option's assignment (item -> slot ids). With 'item': that item's slots and every rule involving it "
+    "(why it is where it is). With 'slot': the items in that slot."
+)
+TOOL_EXPORT_OPTION = "Write an option to a file: .xlsx (sheets by item and by slot) or .csv (by item)."
+TOOL_GET_SPEC = "The problem as a versioned JSON spec (slots, settings, rules), to save or reuse."
+TOOL_SET_SPEC = "Replace slots, settings and rules with a saved JSON spec, checked against this problem's data."
