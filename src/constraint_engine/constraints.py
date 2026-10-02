@@ -19,11 +19,14 @@ Rule types and their args:
     capacity          {"group": <selector>, "min": int|None, "max": int|None,
                        "slots": [int, ...]}
                       How many of the group may hold each slot. "slots" is
-                      optional and limits the rule to those slots.
+                      optional and limits the rule to those slots. As a soft
+                      rule, every unit outside the band is penalized.
     load              {"group": <selector>, "min": int|None, "max": int|None,
-                       "slots": [int, ...]}
+                       "slots": [int, ...], "slot_groups": [[int, ...], ...]}
                       How many slots each entity of the group holds, counting
-                      only "slots" when given ("at most 2 night shifts").
+                      only "slots" when given ("at most 2 night shifts"), or
+                      separately within each of "slot_groups" ("at most 1
+                      shift per day").
     balance           {"group": <selector>, "weight": float}
                       Spread the group as evenly as possible over the slots.
     together          {"entity_a": id, "entity_b": id}
@@ -131,3 +134,12 @@ def selected_slots(args: dict, num_slots: int) -> list[int]:
     if chosen is None:
         return list(range(num_slots))
     return sorted({int(s) for s in chosen})
+
+
+def load_slot_groups(args: dict, num_slots: int) -> list[list[int]]:
+    """The slot sets a load rule counts separately: its "slot_groups", else
+    the single set selected_slots() gives."""
+    groups = args.get("slot_groups")
+    if groups is None:
+        return [selected_slots(args, num_slots)]
+    return [sorted({int(s) for s in group}) for group in groups]

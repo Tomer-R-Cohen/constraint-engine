@@ -49,6 +49,13 @@ many — `(1, 1)` is placement (one slot each), a wider band is rostering.
 `slots_interchangeable` (auto: on only for one slot each) decides whether
 renaming slots gives the same answer.
 
+A whole problem is described by a **spec** (`spec.py`): named slots with
+attributes, the entity id column, typed rules, and settings. `compiler.py`
+checks it against the data and turns each spec rule into exactly one engine
+`Constraint` with the same id; `readback.py` renders each rule in plain
+English. Soft rules carry a priority level (low/medium/high), never a raw
+weight.
+
 | Module | Role |
 |---|---|
 | `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity` (per-slot band, optional slot subset), `load` (per-entity band of slots held, optional subset), `balance`, `together`/`separate`/`at_least_one_of` (share / never share a slot), `fixed`, `partner_requests`. |
@@ -56,7 +63,10 @@ renaming slots gives the same answer.
 | `decision_support.py` | `verify_assignment` (independent rule checker, per-rule `shortfall`), `PortfolioSearch` (rounds of 3: perfect vs compromise), `rank_tradeoffs` (compares options by each soft rule's shortfall). |
 | `feasibility.py` | Pre-solve arithmetic checks for hard capacity and load rules (counts slot places, using the load bands). |
 | `dataset_schema.py`, `excel_loader.py` | Spreadsheet loading, column-kind detection (flag/category/number), id column, entity table. |
-| `text.py` | Every user-facing string. |
+| `spec.py` | `ProblemSpec` (Pydantic, versioned JSON): slots, vocabulary, entity source, settings, rules as a discriminated union per type; entity/slot selectors; `spec_hash`, `data_hash`. |
+| `compiler.py` | `compile_spec` (checks every column/value/entity/slot reference, reports all problems at once as `SpecError`; priority → weight), `entity_table`, `solve_spec` (a round in slot ids, stamped with hashes, engine version, seed). |
+| `readback.py` | `describe_rule` / `describe_spec`: read-backs assembled from templates in `text.py`. |
+| `text.py` | Every user-facing string, including read-back templates and spec errors. |
 
 ## Plan
 
@@ -66,9 +76,11 @@ renaming slots gives the same answer.
    from the data, Hebrew labels → English, several slots per entity~~
    (done). Slots are still bare numbers; named slots with attributes
    (day, shift) come with the spec.
-3. Define the problem spec: a versioned JSON document (XHSTT-style concepts —
-   time slots, typed resources, demands, rules). Each rule: type, which
-   entities it applies to, parameters, hard/soft, priority level.
+3. ~~Define the problem spec: a versioned JSON document. Each rule: type,
+   which entities and slots it applies to, parameters, hard/soft, priority
+   level.~~ Done (`spec.py`, `compiler.py`, `readback.py`). Not yet: rule
+   bundles (named rule sets shared by many entities, like nurse contracts),
+   several entity types per problem (timetabling events), storing results.
 4. Grow the rule catalog toward the 11 shapes in the research report:
    coverage/count limits, no double-booking, eligibility/availability/fixed,
    counts over a time window, consecutive runs, transitions/rest, gaps,

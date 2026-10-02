@@ -27,6 +27,7 @@ from constraint_engine.constraints import (
     DEFAULT_WEIGHT_MUTUAL,
     DEFAULT_WEIGHT_TWO,
     Constraint,
+    load_slot_groups,
     resolve_group_members,
     selected_slots,
     subgroups,
@@ -53,6 +54,9 @@ class SolverConfig:
     # interchangeable exactly when each entity holds one slot; it cannot be
     # True otherwise.
     slots_interchangeable: Optional[bool] = None
+    # How results name the slots (e.g. "mon-am"); numbered from 1 if None.
+    # Display only: the solver never reads it.
+    slot_names: Optional[list[str]] = None
     time_limit_seconds: float = 60.0
     # Not a user dial, deliberately: the seed exists to keep solves
     # reproducible (see the num_search_workers note in optimize()). Changing
@@ -153,7 +157,8 @@ def optimize(
                     text.FIXED_TO_MISSING_SLOT.format(entity=c.args["entity"], slot=slot + 1, num_slots=k)
                 )
         if c.type in ("capacity", "load"):
-            for slot in c.args.get("slots") or ():
+            named = list(c.args.get("slots") or ()) + [s for group in c.args.get("slot_groups") or () for s in group]
+            for slot in named:
                 if slot < 0 or slot >= k:
                     raise OptimizationError(
                         text.RULE_NAMES_MISSING_SLOT.format(label=c.label, slot=slot + 1, num_slots=k)
@@ -324,17 +329,23 @@ def optimize(
             weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
             if weight <= 0:
                 return
-            spread = add_spread_var(counts, c.id)
-            objective_terms.append(-weight * spread)
+            # A preference for the band: penalize every unit outside it.
+            objective_terms.append(
+                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{index}") for index, expr in enumerate(counts))
+            )
 
     def compile_load(c: Constraint):
-        slots = selected_slots(c.args, k)
         lo = c.args.get("min")
         hi = c.args.get("max")
-        loads = {e: sum(x[e, s] for s in slots) for e in group_members(c.args["group"])}
+        members = group_members(c.args["group"])
+        loads = {
+            (e, index): sum(x[e, s] for s in slots)
+            for e in members
+            for index, slots in enumerate(load_slot_groups(c.args, k))
+        }
         if is_flexible(c):
-            for e, expr in loads.items():
-                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{e}"))
+            for (e, index), expr in loads.items():
+                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{e}_{index}"))
         elif c.hard:
             lit = enable_lit(c)
             for expr in loads.values():
@@ -347,7 +358,7 @@ def optimize(
             if weight <= 0:
                 return
             objective_terms.append(
-                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{e}") for e, expr in loads.items())
+                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{e}_{index}") for (e, index), expr in loads.items())
             )
 
     def compile_balance(c: Constraint):

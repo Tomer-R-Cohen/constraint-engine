@@ -21,14 +21,45 @@ CP-SAT and exposed to AI agents (e.g. Claude) as MCP tools.
 The solver core from Shibutzit is generalized: entities and slots instead
 of students and classes, rules over any spreadsheet column, English text in
 one module. An entity can hold one slot (class placement) or several
-(shift rostering), set by `SolverConfig.slots_per_entity`.
+(shift rostering).
+
+A problem is described by a versioned JSON **spec**: named slots with
+attributes (day, shift, ...), typed rules with entity and slot selectors,
+hard/soft mode and a priority level, and solve settings. The spec is checked
+against the data before solving, every rule has a plain-English read-back,
+and results come back in slot names, stamped with spec and data hashes.
 
 Rule types today: `capacity` (how many per slot), `load` (how many slots per
-entity), `balance`, `together` / `separate` / `at_least_one_of`, `fixed`,
-`partner_requests`. Every rule can be hard or soft.
+entity, optionally per day/week/...), `balance`, `together` / `separate` /
+`at_least_one_of`, `fixed`, `partner_requests`.
 
-Next: the versioned JSON problem spec (named slots with attributes such as
-day and shift), a growing rule catalog, then the MCP tools.
+Next: a growing rule catalog (consecutive runs, rest between shifts, ...),
+then the MCP tools.
+
+## Example spec
+
+```json
+{
+  "vocabulary": {"entity": "employee", "entities": "employees", "slot": "shift", "slots": "shifts"},
+  "entities": {"source": "staff.xlsx#Sheet1", "id_column": "Name"},
+  "slots": [
+    {"id": "mon-am", "attributes": {"day": "Mon", "shift": "morning"}},
+    {"id": "mon-pm", "attributes": {"day": "Mon", "shift": "night"}}
+  ],
+  "settings": {"slots_per_entity": [0, 14], "seed": 42, "time_limit_seconds": 30},
+  "rules": [
+    {"id": "nights", "type": "capacity", "slots": {"where": {"shift": "night"}}, "min": 1, "max": 1},
+    {"id": "daily", "type": "load", "per": "day", "max": 1},
+    {"id": "pair", "type": "together", "entity_a": "Ana", "entity_b": "Ben", "mode": "soft", "priority": "high"}
+  ]
+}
+```
+
+Read back as:
+
+- Every shift where shift is night has exactly 1 employee. Mandatory.
+- Each employee has at most 1 shift per day. Mandatory.
+- Ana and Ben share at least one shift. Preference, high priority.
 
 ## Setup
 

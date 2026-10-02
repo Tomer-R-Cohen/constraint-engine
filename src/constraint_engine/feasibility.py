@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from constraint_engine import text
-from constraint_engine.constraints import Constraint, resolve_group_members, selected_slots
+from constraint_engine.constraints import Constraint, load_slot_groups, resolve_group_members, selected_slots
 
 
 @dataclass
@@ -51,13 +51,20 @@ def _holding_bounds(load_rules: list[tuple[Constraint, set]], members: set, slot
     low = {e: max(0, load_min - (num_slots - len(slots))) for e in members}
     high = {e: min(load_max, len(slots)) for e in members}
     for c, rule_members in load_rules:
-        rule_slots = set(selected_slots(c.args, num_slots))
+        groups = [set(group) for group in load_slot_groups(c.args, num_slots)]
+        covered = set().union(*groups)
+        disjoint = sum(len(group) for group in groups) == len(covered)
         lo, hi = c.args.get("min"), c.args.get("max")
+        # Within each group the rule allows lo..hi; slots outside every
+        # group are unconstrained by it.
+        most = sum(min(hi, len(slots & group)) for group in groups) + len(slots - covered) if hi is not None else None
+        least_each = [max(0, lo - len(group - slots)) for group in groups] if lo is not None else []
+        fewest = (sum(least_each) if disjoint else max(least_each, default=0)) if lo is not None else None
         for e in rule_members & members:
-            if hi is not None:
-                high[e] = min(high[e], hi + len(slots - rule_slots))
-            if lo is not None:
-                low[e] = max(low[e], lo - len(rule_slots - slots))
+            if most is not None:
+                high[e] = min(high[e], most)
+            if fewest is not None:
+                low[e] = max(low[e], fewest)
     return low, high
 
 
@@ -92,19 +99,24 @@ def analyze_feasibility(df: pd.DataFrame, constraints: list[Constraint], num_slo
         slots = selected_slots(c.args, k)
         lo = c.args.get("min")
         hi = c.args.get("max")
-        low, high = _holding_bounds(load_rules, members, set(slots), k, slots_per_entity)
         ok = True
         if c.type == "load":
-            # Each member on its own: the band must leave room for the rule.
+            # Each member on its own, in each slot group: the band and the
+            # other load rules must leave room for this one.
             parts = []
-            if lo is not None and any(high[e] < lo for e in members):
-                ok = False
-                parts.append(text.FEAS_LOAD_MIN_UNREACHABLE.format(lo=lo, most=min(high.values())))
-            if hi is not None and any(low[e] > hi for e in members):
-                ok = False
-                parts.append(text.FEAS_LOAD_MAX_UNREACHABLE.format(hi=hi, fewest=max(low.values())))
+            for group in load_slot_groups(c.args, k):
+                low, high = _holding_bounds(load_rules, members, set(group), k, slots_per_entity)
+                if lo is not None and any(high[e] < lo for e in members):
+                    ok = False
+                    parts.append(text.FEAS_LOAD_MIN_UNREACHABLE.format(lo=lo, most=min(high.values())))
+                if hi is not None and any(low[e] > hi for e in members):
+                    ok = False
+                    parts.append(text.FEAS_LOAD_MAX_UNREACHABLE.format(hi=hi, fewest=max(low.values())))
+                if not ok:
+                    break
             report.add(c.label, ok, " ".join(parts) or text.FEAS_LOAD_OK, constraint_id=c.id)
             continue
+        low, high = _holding_bounds(load_rules, members, set(slots), k, slots_per_entity)
         count = len(slots)
         if single:
             parts = [text.FEAS_GROUP_TOTAL.format(total=len(members))]

@@ -22,6 +22,7 @@ from constraint_engine.constraints import (
     DEFAULT_WEIGHT_MUTUAL,
     DEFAULT_WEIGHT_TWO,
     Constraint,
+    load_slot_groups,
     resolve_group_members,
     selected_slots,
     subgroups,
@@ -116,12 +117,18 @@ def verify_assignment(
     constraints: list[Constraint],
     num_slots: int,
     slots_per_entity: tuple[int, int] = (1, 1),
+    slot_names: Optional[list[str]] = None,
 ) -> VerificationReport:
     """Evaluate all active rules without using optimizer internals or status.
 
     `assignment` maps each entity to the list of slots it holds; an entity
-    missing from it holds none.
+    missing from it holds none. Slots are reported by `slot_names` when
+    given, else numbered from 1.
     """
+
+    def name(slot: int):
+        return slot_names[slot] if slot_names else slot + 1
+
     expected_entities = df.index.tolist()
     expected_set = set(expected_entities)
     load_min, load_max = slots_per_entity
@@ -160,8 +167,8 @@ def verify_assignment(
     def shares(a, b) -> bool:
         return bool(holds(a) & holds(b))
 
-    def slot_numbers(e) -> list[int]:
-        return [s + 1 for s in sorted(holds(e))]
+    def slot_numbers(e) -> list:
+        return [name(s) for s in sorted(holds(e))]
 
     def add(con: Constraint, ok: bool, summary: str, *, expected=None, actual=None, shortfall=None,
             entities=None, slots=None, na=False):
@@ -186,16 +193,17 @@ def verify_assignment(
                        for s, count in counts.items()}
             bad = [s for s, units in outside.items() if units]
             add(con, not bad, text.CAPACITY_OK if not bad else text.CAPACITY_BAD.format(count=len(bad)),
-                expected={"min": lo, "max": hi}, actual={s + 1: count for s, count in counts.items()},
+                expected={"min": lo, "max": hi}, actual={name(s): count for s, count in counts.items()},
                 shortfall=sum(outside.values()),
-                entities=[e for s in bad for e in sorted(slot_members[s] & members, key=repr)], slots=[s + 1 for s in bad])
+                entities=[e for s in bad for e in sorted(slot_members[s] & members, key=repr)], slots=[name(s) for s in bad])
         elif con.type == "load":
             members = resolve_group_members(df, args["group"])
-            slots = set(selected_slots(args, num_slots))
+            groups = [set(group) for group in load_slot_groups(args, num_slots)]
             lo, hi = args.get("min"), args.get("max")
-            loads = {e: len(holds(e) & slots) for e in members}
-            outside = {e: max(0, (lo or 0) - load) + max(0, load - hi if hi is not None else 0) for e, load in loads.items()}
-            bad = [e for e, units in outside.items() if units]
+            loads = {(e, index): len(holds(e) & group) for e in members for index, group in enumerate(groups)}
+            outside = {key: max(0, (lo or 0) - load) + max(0, load - hi if hi is not None else 0)
+                       for key, load in loads.items()}
+            bad = list(dict.fromkeys(e for (e, _), units in outside.items() if units))
             add(con, not bad, text.LOAD_OK if not bad else text.LOAD_BAD.format(count=len(bad)),
                 expected={"min": lo, "max": hi},
                 actual={"fewest": min(loads.values(), default=0), "most": max(loads.values(), default=0)},
@@ -222,7 +230,7 @@ def verify_assignment(
             applicable = entity in expected_set
             ok = applicable and target in holds(entity)
             add(con, ok, text.FIXED_OK if ok else text.FIXED_BAD,
-                expected=target + 1, actual=slot_numbers(entity), entities=[entity], na=not applicable)
+                expected=name(target), actual=slot_numbers(entity), entities=[entity], na=not applicable)
         elif con.type == "balance":
             spreads, affected = [], []
             for subgroup in subgroups(df, args["group"]):
@@ -232,10 +240,10 @@ def verify_assignment(
                     spread = max(counts) - min(counts)
                     spreads.append(spread)
                     if spread:
-                        affected.extend(index + 1 for index, count in enumerate(counts) if count in (min(counts), max(counts)))
+                        affected.extend(index for index, count in enumerate(counts) if count in (min(counts), max(counts)))
             actual = max(spreads, default=0)
             add(con, actual == 0, text.BALANCE_OK if actual == 0 else text.BALANCE_BAD.format(gap=actual),
-                expected=text.BALANCE_EXPECTED, actual=actual, shortfall=sum(spreads), slots=sorted(set(affected)))
+                expected=text.BALANCE_EXPECTED, actual=actual, shortfall=sum(spreads), slots=[name(s) for s in sorted(set(affected))])
         elif con.type == "partner_requests":
             requests = args.get("requests", {})
             relevant = [e for e in expected_entities if requests.get(e)]
@@ -394,7 +402,8 @@ def describe_exceptions(report: VerificationReport) -> list[dict]:
 
 def _candidate(option_id: str, title: str, strategy: str, result: OptimizationResult, df, original_constraints,
                cfg, relaxed_ids, first_assignment=None, reference=None) -> CandidateOption:
-    report = verify_assignment(df, result.assignment, original_constraints, cfg.num_slots, cfg.slots_per_entity)
+    report = verify_assignment(df, result.assignment, original_constraints, cfg.num_slots, cfg.slots_per_entity,
+                               cfg.slot_names)
     metrics = slot_metrics(result.assignment, cfg.num_slots)
     compromises = [check.summary for check in report.checks if check.status == "violated"]
     moved = (sum(1 for e, slots in result.assignment.items() if set(reference.get(e, ())) != set(slots))

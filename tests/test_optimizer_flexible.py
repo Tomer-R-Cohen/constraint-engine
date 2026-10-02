@@ -45,3 +45,13 @@ def test_anchor_keeps_entities_in_place_when_nothing_else_matters():
     result = optimize(df, SolverConfig(num_slots=2, time_limit_seconds=5), [size],
                       anchor_assignment=anchor, anchor_weight=1.0)
     assert result.assignment == anchor
+
+
+def test_soft_capacity_prefers_staying_inside_the_band():
+    # Nothing forces it, but the preference puts exactly one entity on each slot.
+    df = _df(2)
+    prefer = Constraint(type="capacity", hard=False, label="one per slot",
+                        args={"group": {"kind": "all"}, "min": 1, "max": 1})
+    cfg = SolverConfig(num_slots=2, slots_per_entity=(0, 2), time_limit_seconds=5)
+    result = optimize(df, cfg, [prefer])
+    assert sorted(s for slots in result.assignment.values() for s in slots) == [0, 1]
