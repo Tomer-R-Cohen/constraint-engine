@@ -18,19 +18,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import math
+
 import pandas as pd
 from ortools.sat.python import cp_model
 
 from constraint_engine import text
 from constraint_engine.constraints import (
     DEFAULT_WEIGHT,
-    DEFAULT_WEIGHT_MUTUAL,
-    DEFAULT_WEIGHT_TWO,
     Constraint,
-    load_slot_groups,
-    resolve_group_members,
-    selected_slots,
-    subgroups,
+    item_groups,
+    placement_weight,
+    rule_slot_indexes,
+    slot_groups,
 )
 
 
@@ -45,7 +45,7 @@ class SolverConfig:
 
     num_slots: int = 6
     # How many slots each entity holds, (min, max). (1, 1) is placement:
-    # every entity in exactly one slot. Rostering widens it and adds `load`
+    # every entity in exactly one slot. Rostering widens it and adds count
     # rules for per-group bands.
     slots_per_entity: tuple[int, int] = (1, 1)
     # Whether slots are interchangeable labels (class 1..6) or distinct
@@ -150,21 +150,9 @@ def optimize(
     k = config.num_slots
 
     for c in active:
-        if c.type == "fixed":
-            slot = c.args["slot"]
+        for slot in rule_slot_indexes(c.args):
             if slot < 0 or slot >= k:
-                raise OptimizationError(
-                    text.FIXED_TO_MISSING_SLOT.format(entity=c.args["entity"], slot=slot + 1, num_slots=k)
-                )
-        if c.type in ("capacity", "load", "run", "transition"):
-            named = (list(c.args.get("slots") or ())
-                     + [s for group in (c.args.get("slot_groups") or c.args.get("units") or ()) for s in group]
-                     + [s for pair in c.args.get("pairs") or () for s in pair])
-            for slot in named:
-                if slot < 0 or slot >= k:
-                    raise OptimizationError(
-                        text.RULE_NAMES_MISSING_SLOT.format(label=c.label, slot=slot + 1, num_slots=k)
-                    )
+                raise OptimizationError(text.RULE_NAMES_MISSING_SLOT.format(label=c.label, slot=slot + 1, num_slots=k))
 
     model = cp_model.CpModel()
     x: dict[tuple, cp_model.IntVar] = {}
@@ -279,14 +267,7 @@ def optimize(
         same_slot_vars[key] = v
         return v
 
-    def group_members(group: dict) -> list:
-        return [m for m in resolve_group_members(df, group) if m in entity_set]
-
-    def slot_counts_for_group(group: dict, slots=None):
-        members = group_members(group)
-        return [sum(x[e, s] for e in members) for s in (range(k) if slots is None else slots)]
-
-    def band_shortfall(expr, lo, hi, name: str):
+    def band_shortfall(expr, lo, hi, name: str, top: int):
         """Units by which `expr` falls outside [lo, hi], as one expression."""
         units = []
         if lo is not None:
@@ -294,98 +275,186 @@ def optimize(
             model.Add(expr + under >= lo)
             units.append(under)
         if hi is not None:
-            over = model.NewIntVar(0, max(n, k), f"{name}_over")
+            over = model.NewIntVar(0, max(0, int(top)), f"{name}_over")
             model.Add(expr - over <= hi)
             units.append(over)
         return sum(units)
 
-    def add_spread_var(counts, name_prefix):
-        max_v = model.NewIntVar(0, n, f"{name_prefix}_max")
-        min_v = model.NewIntVar(0, n, f"{name_prefix}_min")
-        model.AddMaxEquality(max_v, counts)
-        model.AddMinEquality(min_v, counts)
-        spread = model.NewIntVar(0, n, f"{name_prefix}_spread")
-        model.Add(spread == max_v - min_v)
-        return spread
+    def spread_var(exprs, top: int, name: str):
+        """The largest minus the smallest of `exprs`."""
+        largest = model.NewIntVar(0, top, f"{name}_max")
+        smallest = model.NewIntVar(0, top, f"{name}_min")
+        model.AddMaxEquality(largest, exprs)
+        model.AddMinEquality(smallest, exprs)
+        return largest - smallest
 
     def is_flexible(c: Constraint) -> bool:
         return c.hard and c.id in flexible_ids
 
-    # ---- per-type compilers ----
-
-    def compile_capacity(c: Constraint):
-        counts = slot_counts_for_group(c.args["group"], selected_slots(c.args, k))
-        lo = c.args.get("min")
-        hi = c.args.get("max")
+    def finish(c: Constraint, hard, measures, scale: int = 1):
+        """Post a rule in its mode. `hard(lit)` posts its constraints gated
+        by lit; `measures()` returns non-negative expressions that are zero
+        exactly when the rule holds, used to bend it (flexible) or to
+        penalize breaking it (soft)."""
         if is_flexible(c):
-            for index, expr in enumerate(counts):
-                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{index}"))
+            slack_terms.extend(measures())
         elif c.hard:
-            lit = enable_lit(c)
-            for expr in counts:
-                if lo is not None:
-                    model.Add(expr >= lo).OnlyEnforceIf(lit)
-                if hi is not None:
-                    model.Add(expr <= hi).OnlyEnforceIf(lit)
+            hard(enable_lit(c))
         else:
             weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            if weight <= 0:
-                return
-            # A preference for the band: penalize every unit outside it.
-            objective_terms.append(
-                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{index}") for index, expr in enumerate(counts))
-            )
+            if weight > 0:
+                objective_terms.append(-(weight / scale) * sum(measures()))
 
-    def compile_load(c: Constraint):
-        lo = c.args.get("min")
-        hi = c.args.get("max")
-        members = group_members(c.args["group"])
-        loads = {
-            (e, index): sum(x[e, s] for s in slots)
-            for e in members
-            for index, slots in enumerate(load_slot_groups(c.args, k))
-        }
-        if is_flexible(c):
-            for (e, index), expr in loads.items():
-                slack_terms.append(band_shortfall(expr, lo, hi, f"{c.id}_{e}_{index}"))
-        elif c.hard:
-            lit = enable_lit(c)
-            for expr in loads.values():
-                if lo is not None:
-                    model.Add(expr >= lo).OnlyEnforceIf(lit)
-                if hi is not None:
-                    model.Add(expr <= hi).OnlyEnforceIf(lit)
-        else:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            if weight <= 0:
-                return
-            objective_terms.append(
-                -weight * sum(band_shortfall(expr, lo, hi, f"{c.id}_{e}_{index}") for (e, index), expr in loads.items())
-            )
+    def groups_in_model(args: dict, default: str):
+        return [(label, [e for e in ids if e in entity_set])
+                for label, ids in item_groups(df, {**args, "item_groups": args.get("item_groups", default)})]
 
-    def worked_literals(e, units: list[list[int]], of: str, prefix: str) -> list:
-        """One literal per time unit: true when the entity works the unit
-        (holds any of its slots), or, for of="off", when it does not."""
-        literals = []
-        for index, unit in enumerate(units):
-            w = model.NewBoolVar(f"{prefix}_works_{e}_{index}")
-            if unit:
-                model.AddMaxEquality(w, [x[e, s] for s in unit])
+    held_vars: dict[tuple, cp_model.IntVar] = {}
+
+    def held(ids: list, slots: list[int], name: str):
+        """True when any of `ids` holds any of `slots`."""
+        if len(ids) == 1 and len(slots) == 1:
+            return x[ids[0], slots[0]]
+        key = (tuple(ids), tuple(slots))
+        if key not in held_vars:
+            v = model.NewBoolVar(name)
+            if ids and slots:
+                model.AddMaxEquality(v, [x[e, s] for e in ids for s in slots])
             else:
-                model.Add(w == 0)  # nothing to hold: never worked
-            literals.append(w.Not() if of == "off" else w)
-        return literals
+                model.Add(v == 0)
+            held_vars[key] = v
+        return held_vars[key]
 
-    def run_patterns(literals: list, lo, hi) -> list[tuple[str, list, int]]:
+    # ---- the four blocks ----
+
+    def compile_count(c: Constraint):
+        args = c.args
+        rows = groups_in_model(args, "all")
+        columns = slot_groups(args, k)
+        weight_of = placement_weight(args)
+        raw = [weight_of(e, s) for _, ids in rows for e in ids for _, slots in columns for s in slots]
+        bounds = [v for v in (args.get("min"), args.get("max"), args.get("max_gap")) if v is not None]
+        # CP-SAT counts in integers; fractional weights (7.5 hours) are
+        # counted in hundredths, and the bounds with them.
+        scale = 1 if all(float(v).is_integer() for v in raw + bounds) else 100
+
+        def w(e, s) -> int:
+            return int(round(weight_of(e, s) * scale))
+
+        cells, tops = [], []
+        for _, ids in rows:
+            cells.append([sum(w(e, s) * x[e, s] for e in ids for s in slots) for _, slots in columns])
+            tops.append([sum(max(0, w(e, s)) for e in ids for s in slots) for _, slots in columns])
+        top = max((t for row in tops for t in row), default=0)
+        lo = None if args.get("min") is None else math.ceil(args["min"] * scale - 1e-9)
+        hi = None if args.get("max") is None else math.floor(args["max"] * scale + 1e-9)
+        gap = int(round((args.get("max_gap") or 0) * scale))
+        even = args.get("even")
+        lines = []
+        if even == "slots":
+            lines = [row for row in cells if len(row) > 1]
+        elif even == "items":
+            lines = [list(column) for column in zip(*cells) if len(column) > 1]
+        flat = [cell for row in cells for cell in row]
+
+        def hard(lit):
+            for cell in flat:
+                if lo is not None:
+                    model.Add(cell >= lo).OnlyEnforceIf(lit)
+                if hi is not None:
+                    model.Add(cell <= hi).OnlyEnforceIf(lit)
+            for index, line in enumerate(lines):
+                model.Add(spread_var(line, top, f"{c.id}_line{index}") <= gap).OnlyEnforceIf(lit)
+
+        def measures():
+            out = []
+            if lo is not None or hi is not None:
+                out += [band_shortfall(cell, lo, hi, f"{c.id}_cell{index}", top) for index, cell in enumerate(flat)]
+            for index, line in enumerate(lines):
+                excess = model.NewIntVar(0, top, f"{c.id}_excess{index}")
+                model.Add(excess >= spread_var(line, top, f"{c.id}_line{index}") - gap)
+                out.append(excess)
+            return out
+
+        finish(c, hard, measures, scale)
+
+    def compile_share(c: Constraint):
+        cases = []
+        for case in c.args["cases"]:
+            e = case["item"]
+            others = [o for o in case["with"] if o in entity_set and o != e]
+            if e in entity_set and others:
+                cases.append((e, others, case.get("min"), case.get("max")))
+        if not cases:
+            return
+
+        def hard(lit):
+            for e, others, lo, hi in cases:
+                if single and len(others) == 1 and (lo or 0) >= 1:
+                    # One slot each: together means the same slot.
+                    for s in range(k):
+                        model.Add(x[e, s] == x[others[0], s]).OnlyEnforceIf(lit)
+                    continue
+                if hi == 0:
+                    for o in others:
+                        for s in range(k):
+                            model.Add(x[e, s] + x[o, s] <= 1).OnlyEnforceIf(lit)
+                    continue
+                shared = sum(get_same_slot_var(e, o) for o in others)
+                if lo is not None:
+                    model.Add(shared >= lo).OnlyEnforceIf(lit)
+                if hi is not None:
+                    model.Add(shared <= hi).OnlyEnforceIf(lit)
+
+        def measures():
+            return [
+                band_shortfall(sum(get_same_slot_var(e, o) for o in others), lo, hi, f"{c.id}_{e}", len(others))
+                for e, others, lo, hi in cases
+            ]
+
+        finish(c, hard, measures)
+
+    def stretch_patterns(literals: list, lo, hi, ignore_edges: bool, prefix: str) -> list[tuple[str, list, int]]:
         """Each way a stretch can break the band, as (kind, literals, bound):
         ("sum", window, hi) -- a window of hi+1 units all in the stretch;
-        ("clause", lits, 0) -- a stretch shorter than lo with a known unit
-        on both sides, written as the clause that forbids it."""
+        ("clause", lits, 0) -- the clause that forbids a bad stretch.
+        A stretch shorter than lo is only bad with a known unit on both
+        sides; with ignore_edges, a long stretch is too."""
         patterns = []
         n_units = len(literals)
+        before, after = {}, {}
+
+        def other_before(i):
+            # Some unit before i is outside the stretch.
+            if i not in before:
+                v = model.NewBoolVar(f"{prefix}_before{i}")
+                outside = [lit.Not() for lit in literals[:i]]
+                model.AddBoolOr(outside).OnlyEnforceIf(v)
+                for lit in outside:
+                    model.AddImplication(lit, v)
+                before[i] = v
+            return before[i]
+
+        def other_after(i):
+            # Some unit from i on is outside the stretch.
+            if i not in after:
+                v = model.NewBoolVar(f"{prefix}_after{i}")
+                outside = [lit.Not() for lit in literals[i:]]
+                model.AddBoolOr(outside).OnlyEnforceIf(v)
+                for lit in outside:
+                    model.AddImplication(lit, v)
+                after[i] = v
+            return after[i]
+
         if hi is not None:
             for start in range(n_units - hi):
-                patterns.append(("sum", literals[start:start + hi + 1], hi))
+                window = literals[start:start + hi + 1]
+                if not ignore_edges:
+                    patterns.append(("sum", window, hi))
+                elif start > 0 and start + hi + 1 < n_units:
+                    clause = [lit.Not() for lit in window]
+                    clause += [other_before(start).Not(), other_after(start + hi + 1).Not()]
+                    patterns.append(("clause", clause, 0))
         if lo is not None and lo >= 2:
             for start in range(1, n_units):
                 for length in range(1, lo):
@@ -396,178 +465,71 @@ def optimize(
                     patterns.append(("clause", clause, 0))
         return patterns
 
-    def compile_run(c: Constraint):
-        units = [list(unit) for unit in c.args["units"]]
-        lo, hi = c.args.get("min"), c.args.get("max")
-        of = c.args.get("of", "work")
-        patterns = [p for e in group_members(c.args["group"]) for p in run_patterns(worked_literals(e, units, of, c.id), lo, hi)]
+    def compile_stretch(c: Constraint):
+        args = c.args
+        lo, hi = args.get("min"), args.get("max")
+        of = args.get("of", "work")
+        patterns = []
+        for g, (_, ids) in enumerate(groups_in_model(args, "each")):
+            if not ids:
+                continue
+            for q, sequence in enumerate(args["sequences"]):
+                prefix = f"{c.id}_{g}_{q}"
+                worked = [held(ids, list(unit), f"{prefix}_unit{u}") for u, unit in enumerate(sequence)]
+                literals = [w.Not() for w in worked] if of == "off" else worked
+                patterns += stretch_patterns(literals, lo, hi, bool(args.get("ignore_edges")), prefix)
         if not patterns:
             return
-        lit = enable_lit(c) if c.hard and not is_flexible(c) else None
-        penalties = []
-        for index, (kind, lits, bound) in enumerate(patterns):
-            if lit is not None:
+
+        def hard(lit):
+            for kind, lits, bound in patterns:
                 if kind == "sum":
                     model.Add(sum(lits) <= bound).OnlyEnforceIf(lit)
                 else:
                     model.AddBoolOr(lits).OnlyEnforceIf(lit)
-                continue
-            broken = model.NewBoolVar(f"{c.id}_broken_{index}")
-            if kind == "sum":
-                model.Add(sum(lits) <= bound + broken)
-            else:
-                model.AddBoolOr(lits + [broken])
-            penalties.append(broken)
-        if is_flexible(c):
-            slack_terms.extend(penalties)
-        elif not c.hard:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            if weight > 0:
-                objective_terms.append(-weight * sum(penalties))
+
+        def measures():
+            out = []
+            for index, (kind, lits, bound) in enumerate(patterns):
+                broken = model.NewBoolVar(f"{c.id}_broken{index}")
+                if kind == "sum":
+                    model.Add(sum(lits) <= bound + broken)
+                else:
+                    model.AddBoolOr(lits + [broken])
+                out.append(broken)
+            return out
+
+        finish(c, hard, measures)
 
     def compile_transition(c: Constraint):
         pairs = [(int(a), int(b)) for a, b in c.args["pairs"]]
-        members = group_members(c.args["group"])
-        if not pairs or not members:
+        holds = [
+            (held(ids, [a], f"{c.id}_{g}_{a}"), held(ids, [b], f"{c.id}_{g}_{b}"))
+            for g, (_, ids) in enumerate(groups_in_model(c.args, "each")) if ids
+            for a, b in pairs
+        ]
+        if not holds:
             return
-        lit = enable_lit(c) if c.hard and not is_flexible(c) else None
-        penalties = []
-        for e in members:
-            for a, b in pairs:
-                if lit is not None:
-                    model.Add(x[e, a] + x[e, b] <= 1).OnlyEnforceIf(lit)
-                    continue
-                both = model.NewBoolVar(f"{c.id}_both_{e}_{a}_{b}")
-                model.Add(x[e, a] + x[e, b] <= 1 + both)
-                penalties.append(both)
-        if is_flexible(c):
-            slack_terms.extend(penalties)
-        elif not c.hard:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            if weight > 0:
-                objective_terms.append(-weight * sum(penalties))
 
-    def compile_balance(c: Constraint):
-        weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-        if not c.hard and weight <= 0:
-            return
-        # A multi-group selector gets one spread var per sub-group; the
-        # rule's total is their sum -- same math as separate weighted rules,
-        # just presented (and toggled, and referenced by id) as one rule.
-        groups = subgroups(df, c.args["group"])
-        spreads = [add_spread_var(slot_counts_for_group(g), f"{c.id}_{i}") for i, g in enumerate(groups)]
-        if not spreads:
-            return
-        if is_flexible(c):
-            slack_terms.extend(spreads)
-        elif c.hard:
-            lit = enable_lit(c)
-            for spread in spreads:
-                model.Add(spread == 0).OnlyEnforceIf(lit)
-        else:
-            objective_terms.append(-weight * sum(spreads))
+        def hard(lit):
+            for first, then in holds:
+                model.Add(first + then <= 1).OnlyEnforceIf(lit)
 
-    def compile_separate(c: Constraint):
-        a, b = c.args["entity_a"], c.args["entity_b"]
-        if a not in entity_set or b not in entity_set:
-            return
-        if is_flexible(c):
-            slack_terms.append(get_same_slot_var(a, b))
-        elif c.hard:
-            lit = enable_lit(c)
-            for s in range(k):
-                model.Add(x[a, s] + x[b, s] <= 1).OnlyEnforceIf(lit)
-        else:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            objective_terms.append(-weight * get_same_slot_var(a, b))
+        def measures():
+            out = []
+            for index, (first, then) in enumerate(holds):
+                both = model.NewBoolVar(f"{c.id}_both{index}")
+                model.Add(first + then <= 1 + both)
+                out.append(both)
+            return out
 
-    def compile_together(c: Constraint):
-        a, b = c.args["entity_a"], c.args["entity_b"]
-        if a not in entity_set or b not in entity_set:
-            return
-        if is_flexible(c):
-            slack_terms.append(1 - get_same_slot_var(a, b))
-        elif c.hard:
-            lit = enable_lit(c)
-            if single:
-                for s in range(k):
-                    model.Add(x[a, s] == x[b, s]).OnlyEnforceIf(lit)
-            else:
-                model.Add(get_same_slot_var(a, b) == 1).OnlyEnforceIf(lit)
-        else:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            objective_terms.append(weight * get_same_slot_var(a, b))
-
-    def compile_at_least_one_of(c: Constraint):
-        e = c.args["entity"]
-        candidates = [m for m in c.args["candidates"] if m in entity_set and m != e]
-        if e not in entity_set or not candidates:
-            return
-        co_vars = [get_same_slot_var(e, m) for m in candidates]
-        if is_flexible(c):
-            met = model.NewBoolVar(f"{c.id}_met")
-            model.Add(sum(co_vars) >= 1).OnlyEnforceIf(met)
-            model.Add(sum(co_vars) == 0).OnlyEnforceIf(met.Not())
-            slack_terms.append(1 - met)
-        elif c.hard:
-            lit = enable_lit(c)
-            model.Add(sum(co_vars) >= 1).OnlyEnforceIf(lit)
-        else:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            satisfied = model.NewBoolVar(f"{c.id}_satisfied")
-            model.Add(sum(co_vars) >= 1).OnlyEnforceIf(satisfied)
-            model.Add(sum(co_vars) == 0).OnlyEnforceIf(satisfied.Not())
-            objective_terms.append(weight * satisfied)
-
-    def compile_fixed(c: Constraint):
-        e = c.args["entity"]
-        s = c.args["slot"]
-        if e not in entity_set:
-            return
-        if is_flexible(c):
-            slack_terms.append(1 - x[e, s])
-        elif c.hard:
-            lit = enable_lit(c)
-            model.Add(x[e, s] == 1).OnlyEnforceIf(lit)
-        else:
-            weight = c.args.get("weight", DEFAULT_WEIGHT[c.type])
-            objective_terms.append(weight * x[e, s])
-
-    def compile_partner_requests(c: Constraint):
-        requests = c.args.get("requests", {})
-        weight_mutual = c.args.get("weight_mutual", DEFAULT_WEIGHT_MUTUAL)
-        weight_two = c.args.get("weight_two", DEFAULT_WEIGHT_TWO)
-        for e in entities:
-            requested = [r for r in requests.get(e, []) if r in entity_set and r != e]
-            if not requested:
-                continue
-            mutuals = [r for r in requested if e in requests.get(r, [])]
-            if mutuals and weight_mutual > 0:
-                co_vars = [get_same_slot_var(e, m) for m in mutuals]
-                hm = model.NewBoolVar(f"{c.id}_mutual_{e}")
-                model.Add(sum(co_vars) >= 1).OnlyEnforceIf(hm)
-                model.Add(sum(co_vars) == 0).OnlyEnforceIf(hm.Not())
-                objective_terms.append(weight_mutual * hm)
-            if weight_two > 0:
-                co_vars_all = [get_same_slot_var(e, r) for r in requested]
-                cnt = model.NewIntVar(0, len(co_vars_all), f"{c.id}_count_{e}")
-                model.Add(cnt == sum(co_vars_all))
-                tf = model.NewBoolVar(f"{c.id}_two_{e}")
-                model.Add(cnt >= 2).OnlyEnforceIf(tf)
-                model.Add(cnt <= 1).OnlyEnforceIf(tf.Not())
-                objective_terms.append(weight_two * tf)
+        finish(c, hard, measures)
 
     COMPILERS = {
-        "capacity": compile_capacity,
-        "load": compile_load,
-        "run": compile_run,
+        "count": compile_count,
+        "share": compile_share,
+        "stretch": compile_stretch,
         "transition": compile_transition,
-        "balance": compile_balance,
-        "separate": compile_separate,
-        "together": compile_together,
-        "at_least_one_of": compile_at_least_one_of,
-        "fixed": compile_fixed,
-        "partner_requests": compile_partner_requests,
     }
 
     for c in active:

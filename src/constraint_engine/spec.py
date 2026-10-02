@@ -5,9 +5,10 @@ the entity table is identified, lists the rules, and carries the solve
 settings. It holds no data: the entity rows come from the loaded
 spreadsheet, and `compiler.py` checks the spec against them.
 
-Rules are typed: each rule type is its own model with its own fields, so an
-agent fills a fixed form instead of writing anything free-form, and a wrong
-field is rejected when the rule is added, not discovered at solve time.
+Rules are typed: four building blocks (count, share, stretch, transition),
+each its own model with its own fields, so an agent fills a fixed form
+instead of writing anything free-form, and a wrong field is rejected when
+the rule is added, not discovered at solve time.
 
 Selectors:
 
@@ -43,7 +44,7 @@ Priority = Literal["low", "medium", "high"]
 
 
 class _Model(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
 
 class EntitySelector(_Model):
@@ -132,124 +133,144 @@ class _Band(_Model):
     min: Optional[int] = Field(default=None, ge=0)
     max: Optional[int] = Field(default=None, ge=0)
 
-    @model_validator(mode="after")
-    def _band(self):
-        if self.min is None and self.max is None:
+    def _check_band(self, required: bool = True):
+        if required and self.min is None and self.max is None:
             raise ValueError(text.SPEC_BAND_EMPTY)
         if self.min is not None and self.max is not None and self.min > self.max:
             raise ValueError(text.SPEC_BAND_REVERSED)
-        return self
 
 
-class CapacityRule(_RuleBase, _Band):
-    """In each selected slot, how many of the selected entities."""
+class PerColumn(_Model):
+    """Group items by a column: one group per value of `column`, or one
+    group per flag column in `flag_columns`."""
 
-    type: Literal["capacity"]
-    entities: EntitySelector = Field(default_factory=EntitySelector)
-    slots: SlotSelector = Field(default_factory=SlotSelector)
-
-
-class LoadRule(_RuleBase, _Band):
-    """For each selected entity, how many of the selected slots it holds --
-    counted separately for each value of the slot attribute `per`, if given
-    ("at most 1 shift per day")."""
-
-    type: Literal["load"]
-    entities: EntitySelector = Field(default_factory=EntitySelector)
-    slots: SlotSelector = Field(default_factory=SlotSelector)
-    per: Optional[str] = None
-
-
-class RunRule(_RuleBase, _Band):
-    """Stretch lengths over time. `per` is the slot attribute that makes the
-    time units (e.g. "day"), in the order units first appear in the slot
-    list. An entity works a unit if it holds any selected slot in it. Every
-    stretch of worked units (of="work") or unworked units (of="off") is
-    min..max long; a stretch at the start or end of the schedule is never
-    too short."""
-
-    type: Literal["run"]
-    entities: EntitySelector = Field(default_factory=EntitySelector)
-    slots: SlotSelector = Field(default_factory=SlotSelector)
-    per: str
-    of: Literal["work", "off"] = "work"
-
-
-class TransitionRule(_RuleBase):
-    """Rest between slots: an entity holding a slot matched by `after` holds
-    no slot matched by `not_followed_by` in the next `within` time units
-    (units made by the slot attribute `per`)."""
-
-    type: Literal["transition"]
-    entities: EntitySelector = Field(default_factory=EntitySelector)
-    after: SlotSelector
-    not_followed_by: SlotSelector
-    per: str
-    within: int = Field(default=1, ge=1)
-
-
-class BalanceRule(_RuleBase):
-    """Spread entities evenly over the slots. Exactly one of: `entities`
-    (one group), `by_column` (each value of a category column, as one rule),
-    `flag_columns` (each flag column, as one rule)."""
-
-    type: Literal["balance"]
-    entities: Optional[EntitySelector] = None
-    by_column: Optional[str] = None
+    column: Optional[str] = None
     flag_columns: Optional[list[str]] = None
 
     @model_validator(mode="after")
-    def _one_target(self):
-        given = [v for v in (self.entities, self.by_column, self.flag_columns) if v is not None]
-        if len(given) != 1:
-            raise ValueError(text.SPEC_BALANCE_ONE_TARGET)
+    def _one_kind(self):
+        if (self.column is None) == (self.flag_columns is None):
+            raise ValueError(text.SPEC_PER_COLUMN_ONE_KIND)
         return self
 
 
-class TogetherRule(_RuleBase):
-    """The two entities share a slot."""
+class PerAttribute(_Model):
+    """Group slots by an attribute: one group per value (e.g. per day)."""
 
-    type: Literal["together"]
-    entity_a: EntityRef
-    entity_b: EntityRef
+    attribute: str
 
 
-class SeparateRule(_RuleBase):
-    """The two entities never share a slot."""
+class SumOf(_Model):
+    """Add up a number instead of counting: an item column (hours someone
+    can give, a student's size) or a slot attribute (a shift's hours)."""
 
-    type: Literal["separate"]
-    entity_a: EntityRef
-    entity_b: EntityRef
+    item_column: Optional[str] = None
+    slot_attribute: Optional[str] = None
 
-
-class AtLeastOneOfRule(_RuleBase):
-    """The entity shares a slot with at least one of the candidates."""
-
-    type: Literal["at_least_one_of"]
-    entity: EntityRef
-    candidates: list[EntityRef] = Field(min_length=1)
+    @model_validator(mode="after")
+    def _one_kind(self):
+        if (self.item_column is None) == (self.slot_attribute is None):
+            raise ValueError(text.SPEC_SUM_ONE_KIND)
+        return self
 
 
-class FixedRule(_RuleBase):
-    """The entity holds this slot (and possibly others)."""
+class CountRule(_RuleBase):
+    """Count placements of the selected items in the selected slots (or add
+    up `sum`), per group, and keep every group's count within min..max, or
+    keep the groups `even` (compared along slot groups or along item
+    groups, at most `max_gap` apart when mandatory).
 
-    type: Literal["fixed"]
-    entity: EntityRef
-    slot: str
+    per_item: "all" (one group), "each" (every item on its own), or a
+    PerColumn. per_slot: "all", "each" (every slot on its own), or a
+    PerAttribute. Examples: per_item "all" + per_slot "each" = how many per
+    slot; per_item "each" + per_slot "all" = how many slots per item;
+    per_item "each" + per_slot {"attribute": "day"} = per item per day."""
+
+    type: Literal["count"]
+    items: EntitySelector = Field(default_factory=EntitySelector)
+    slots: SlotSelector = Field(default_factory=SlotSelector)
+    per_item: Union[Literal["all", "each"], PerColumn]
+    per_slot: Union[Literal["all", "each"], PerAttribute]
+    sum: Optional[SumOf] = None
+    min: Optional[float] = Field(default=None, ge=0)
+    max: Optional[float] = Field(default=None, ge=0)
+    even: Optional[Literal["slots", "items"]] = None
+    max_gap: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _target(self):
+        if self.min is None and self.max is None and self.even is None:
+            raise ValueError(text.SPEC_COUNT_NEEDS_TARGET)
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(text.SPEC_BAND_REVERSED)
+        if self.max_gap is not None and self.even is None:
+            raise ValueError(text.SPEC_GAP_NEEDS_EVEN)
+        return self
 
 
-class PartnerRequestsRule(_RuleBase):
-    """Soft goal: each requester shares a slot with a mutual request and
-    with at least two of the entities it asked for."""
+class ShareRule(_RuleBase, _Band):
+    """An item shares a slot with min..max of the listed items: together is
+    min 1 of [b], apart is max 0 of [b]. Either one `item` with a `with`
+    list, or every selected item with the items named in its
+    `with_column` (comma-separated ids, e.g. friend requests)."""
 
-    type: Literal["partner_requests"]
-    mode: Literal["soft"] = "soft"
-    requests: dict[str, list[EntityRef]]
+    type: Literal["share"]
+    item: Optional[EntityRef] = None
+    with_: Optional[list[EntityRef]] = Field(default=None, alias="with")
+    items: Optional[EntitySelector] = None
+    with_column: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_form(self):
+        self._check_band()
+        single = self.item is not None or self.with_ is not None
+        by_column = self.with_column is not None
+        if single == by_column or (single and (self.item is None or self.with_ is None or self.items is not None)):
+            raise ValueError(text.SPEC_SHARE_ONE_FORM)
+        return self
+
+
+class StretchRule(_RuleBase, _Band):
+    """Stretch lengths over time. `per` is the slot attribute that makes the
+    time units (e.g. "day"), ordered as they first appear in the slot list;
+    with `within_each`, the units restart for each value of that attribute
+    (periods within each day). An item -- or a group of items, with
+    per_item -- works a unit if it holds any selected slot in it. Every
+    stretch of worked (of="work") or unworked (of="off") units is min..max
+    long. A stretch at either end is never too short; with ignore_edges it
+    is not checked at all (a gap is only a gap between two lessons)."""
+
+    type: Literal["stretch"]
+    items: EntitySelector = Field(default_factory=EntitySelector)
+    per_item: Union[Literal["each"], PerColumn] = "each"
+    slots: SlotSelector = Field(default_factory=SlotSelector)
+    per: str
+    within_each: Optional[str] = None
+    of: Literal["work", "off"] = "work"
+    ignore_edges: bool = False
+
+    @model_validator(mode="after")
+    def _band_given(self):
+        self._check_band()
+        return self
+
+
+class TransitionRule(_RuleBase):
+    """Rest between slots: an item (or group, with per_item) holding a slot
+    matched by `after` holds no slot matched by `not_followed_by` in the
+    next `next` time units (units made by the slot attribute `per`)."""
+
+    type: Literal["transition"]
+    items: EntitySelector = Field(default_factory=EntitySelector)
+    per_item: Union[Literal["each"], PerColumn] = "each"
+    after: SlotSelector
+    not_followed_by: SlotSelector
+    per: str
+    next: int = Field(default=1, ge=1)
 
 
 Rule = Annotated[
-    Union[CapacityRule, LoadRule, RunRule, TransitionRule, BalanceRule, TogetherRule, SeparateRule, AtLeastOneOfRule, FixedRule,
-          PartnerRequestsRule],
+    Union[CountRule, ShareRule, StretchRule, TransitionRule],
     Field(discriminator="type"),
 ]
 

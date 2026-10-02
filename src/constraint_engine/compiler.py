@@ -12,6 +12,7 @@ ids, not indexes), stamped with what produced them.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -20,24 +21,20 @@ from typing import Any, Optional
 import pandas as pd
 
 from constraint_engine import text
-from constraint_engine.constraints import DEFAULT_WEIGHT, DEFAULT_WEIGHT_MUTUAL, DEFAULT_WEIGHT_TWO, Constraint
+from constraint_engine.constraints import DEFAULT_WEIGHT, Constraint, resolve_group_members
 from constraint_engine.dataset_schema import describe_columns, prepare_entities
 from constraint_engine.decision_support import generate_portfolio, negotiation_question
 from constraint_engine.optimizer import SolverConfig
 from constraint_engine.readback import describe_rule
 from constraint_engine.spec import (
-    AtLeastOneOfRule,
-    BalanceRule,
-    CapacityRule,
+    CountRule,
     EntitySelector,
-    FixedRule,
-    LoadRule,
-    PartnerRequestsRule,
+    PerAttribute,
+    PerColumn,
     ProblemSpec,
-    RunRule,
-    SeparateRule,
+    ShareRule,
     SlotSelector,
-    TogetherRule,
+    StretchRule,
     TransitionRule,
     data_hash,
     spec_hash,
@@ -86,6 +83,13 @@ def entity_table(raw_df: pd.DataFrame, spec: ProblemSpec) -> pd.DataFrame:
 
 def _join(items) -> str:
     return ", ".join(str(i) for i in items)
+
+
+def _split_names(cell) -> list[str]:
+    """Ids listed in one cell: "Ana, Ben; Cy" -> ["Ana", "Ben", "Cy"]."""
+    if cell is None or (isinstance(cell, float) and cell != cell):
+        return []
+    return [part.strip() for part in re.split(r"[,;\n]", str(cell)) if part.strip()]
 
 
 def _same(a, b) -> bool:
@@ -190,91 +194,132 @@ class _Compiler:
 
     # ---- rules ----
 
-    def weight_args(self, rule, args: dict) -> dict:
-        if rule.mode == "soft":
-            factor = PRIORITY_FACTOR[rule.level]
-            if rule.type == "partner_requests":
-                args["weight_mutual"] = DEFAULT_WEIGHT_MUTUAL * factor
-                args["weight_two"] = DEFAULT_WEIGHT_TWO * factor
-            else:
-                args["weight"] = DEFAULT_WEIGHT[rule.type] * factor
-        return args
+    def item_grouping(self, rule_id: str, per_item):
+        if isinstance(per_item, str):
+            return per_item
+        if per_item.column is not None:
+            return {"column": per_item.column} if self.column(rule_id, per_item.column, flag=False) else None
+        ok = all([self.column(rule_id, c, flag=True) for c in per_item.flag_columns])
+        return {"columns": list(per_item.flag_columns)} if ok else None
+
+    def units(self, rule_id: str, per: str, keep: Optional[list[int]], within_each: Optional[str] = None):
+        """Time units in slot-list order, each the slots of one value of
+        `per` (restricted to `keep`); one sequence, or one per value of
+        `within_each`."""
+        if within_each is None:
+            return [[[s for s in unit if keep is None or s in keep] for unit in self.per_groups(rule_id, per, None)]]
+        sequences = []
+        for outer in self.per_groups(rule_id, within_each, None):
+            inner: dict[Any, list[int]] = {}
+            for i in outer:
+                slot = self.spec.slots[i]
+                if per not in slot.attributes:
+                    self.problem(rule_id, text.SPEC_SLOT_MISSING_ATTRIBUTE.format(slot=slot.id, attribute=per))
+                    continue
+                inner.setdefault(slot.attributes[per], []).append(i)
+            sequences.append([[s for s in unit if keep is None or s in keep] for unit in inner.values()])
+        return sequences
+
+    def weights(self, rule_id: str, rule: CountRule, group: Optional[dict]):
+        if rule.sum is None:
+            return None
+        if rule.sum.item_column is not None:
+            column = rule.sum.item_column
+            if not self.column(rule_id, column, flag=False) or group is None:
+                return None
+            members = resolve_group_members(self.df, group)
+            values = pd.to_numeric(self.df.loc[members, column], errors="coerce")
+            bad = [str(e) for e, v in values.items() if pd.isna(v) or v < 0]
+            if bad:
+                self.problem(rule_id, text.SPEC_NOT_NUMERIC.format(column=column, bad=_join(bad[:8])))
+                return None
+            return {"items": {e: float(v) for e, v in values.items()}}
+        attribute = rule.sum.slot_attribute
+        if attribute not in self.attributes:
+            self.problem(rule_id, text.SPEC_UNKNOWN_ATTRIBUTE.format(attribute=attribute, attributes=_join(self.attributes) or "-"))
+            return None
+        values = []
+        for slot in self.spec.slots:
+            value = slot.attributes.get(attribute, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                self.problem(rule_id, text.SPEC_SLOT_NOT_NUMERIC.format(slot=slot.id, attribute=attribute))
+                return None
+            values.append(float(value))
+        return {"slots": values}
 
     def rule(self, rule) -> Optional[Constraint]:
         before = len(self.problems)
         rid = rule.id
         args: dict[str, Any]
-        request_count = None
-        if isinstance(rule, CapacityRule):
-            args = {"group": self.entity_group(rid, rule.entities), "min": rule.min, "max": rule.max}
+        if isinstance(rule, CountRule):
+            group = self.entity_group(rid, rule.items)
             chosen = self.slots(rid, rule.slots)
-            if chosen is not None:
-                args["slots"] = chosen
-        elif isinstance(rule, LoadRule):
-            args = {"group": self.entity_group(rid, rule.entities), "min": rule.min, "max": rule.max}
+            args = {"items": group, "item_groups": self.item_grouping(rid, rule.per_item)}
+            if isinstance(rule.per_slot, PerAttribute):
+                attribute = rule.per_slot.attribute
+                groups = self.per_groups(rid, attribute, chosen)
+                args["slot_groups"] = groups
+                args["slot_group_labels"] = [
+                    f"{attribute} {self.spec.slots[g[0]].attributes.get(attribute)}" if g else "" for g in groups
+                ]
+            else:
+                args["slot_groups"] = rule.per_slot
+                if chosen is not None:
+                    args["slots"] = chosen
+            weights = self.weights(rid, rule, group)
+            if weights:
+                args["weights"] = weights
+            for key in ("min", "max", "even", "max_gap"):
+                if getattr(rule, key) is not None:
+                    args[key] = getattr(rule, key)
+        elif isinstance(rule, ShareRule):
+            if rule.with_column is None:
+                item = self.entity(rid, rule.item)
+                others = [self.entity(rid, o) for o in rule.with_]
+                if item is not None and item in others:
+                    self.problem(rid, text.SPEC_SAME_ENTITY_TWICE.format(entity=rule.item))
+                cases = [{"item": item, "with": others}]
+            else:
+                cases = []
+                group = self.entity_group(rid, rule.items)
+                if self.column(rid, rule.with_column, flag=False) and group is not None:
+                    for e in resolve_group_members(self.df, group):
+                        named = _split_names(self.df.at[e, rule.with_column])
+                        resolved = [self.entity(rid, name) for name in named]
+                        resolved = [o for o in resolved if o is not None and o != e]
+                        if resolved:
+                            cases.append({"item": e, "with": resolved})
+            for case in cases:
+                case.update({"min": rule.min, "max": rule.max})
+            args = {"cases": cases}
+        elif isinstance(rule, StretchRule):
             chosen = self.slots(rid, rule.slots)
-            if rule.per is not None:
-                args["slot_groups"] = self.per_groups(rid, rule.per, chosen)
-            elif chosen is not None:
-                args["slots"] = chosen
-        elif isinstance(rule, RunRule):
-            chosen = self.slots(rid, rule.slots)
-            keep = None if chosen is None else set(chosen)
-            units = self.per_groups(rid, rule.per, None)
-            args = {"group": self.entity_group(rid, rule.entities), "min": rule.min, "max": rule.max, "of": rule.of,
-                    "units": [[s for s in unit if keep is None or s in keep] for unit in units]}
+            args = {"items": self.entity_group(rid, rule.items), "item_groups": self.item_grouping(rid, rule.per_item),
+                    "sequences": self.units(rid, rule.per, chosen, rule.within_each),
+                    "of": rule.of, "min": rule.min, "max": rule.max, "ignore_edges": rule.ignore_edges}
         elif isinstance(rule, TransitionRule):
             after = self.slots(rid, rule.after)
             followed = self.slots(rid, rule.not_followed_by)
             first = None if after is None else set(after)
             then = None if followed is None else set(followed)
-            units = self.per_groups(rid, rule.per, None)
+            (units,) = self.units(rid, rule.per, None)
             pairs = [
                 [a, b]
                 for i, unit in enumerate(units)
-                for later in units[i + 1:i + 1 + rule.within]
+                for later in units[i + 1:i + 1 + rule.next]
                 for a in unit if first is None or a in first
                 for b in later if then is None or b in then
             ]
-            args = {"group": self.entity_group(rid, rule.entities), "pairs": pairs}
-        elif isinstance(rule, BalanceRule):
-            if rule.by_column is not None:
-                ok = self.column(rid, rule.by_column, flag=False)
-                args = {"group": {"kind": "column_all_values", "column": rule.by_column} if ok else None}
-            elif rule.flag_columns is not None:
-                ok = all([self.column(rid, c, flag=True) for c in rule.flag_columns])
-                args = {"group": {"kind": "columns", "columns": list(rule.flag_columns)} if ok else None}
-            else:
-                args = {"group": self.entity_group(rid, rule.entities)}
-        elif isinstance(rule, (TogetherRule, SeparateRule)):
-            a, b = self.entity(rid, rule.entity_a), self.entity(rid, rule.entity_b)
-            if a is not None and a == b:
-                self.problem(rid, text.SPEC_SAME_ENTITY_TWICE.format(entity=rule.entity_a))
-            args = {"entity_a": a, "entity_b": b}
-        elif isinstance(rule, AtLeastOneOfRule):
-            args = {"entity": self.entity(rid, rule.entity),
-                    "candidates": [self.entity(rid, c) for c in rule.candidates]}
-        elif isinstance(rule, FixedRule):
-            if rule.slot not in self.slot_index:
-                self.problem(rid, text.SPEC_UNKNOWN_SLOT.format(slot=rule.slot))
-            args = {"entity": self.entity(rid, rule.entity), "slot": self.slot_index.get(rule.slot)}
-        elif isinstance(rule, PartnerRequestsRule):
-            requests = {}
-            for requester, asked in rule.requests.items():
-                e = self.entity(rid, requester)
-                wanted = [self.entity(rid, other) for other in asked]
-                if e is not None:
-                    requests[e] = [w for w in wanted if w is not None]
-            args = {"requests": requests}
-            request_count = sum(1 for asked in requests.values() if asked)
+            args = {"items": self.entity_group(rid, rule.items), "item_groups": self.item_grouping(rid, rule.per_item),
+                    "pairs": pairs}
         else:  # pragma: no cover - the spec's union is closed
             raise TypeError(f"cannot compile {type(rule).__name__}")
         if len(self.problems) > before:
             return None
-        return Constraint(
-            type=rule.type, hard=rule.mode == "hard", args=self.weight_args(rule, args),
-            label=describe_rule(rule, self.spec, request_count), source="chat", active=rule.active, id=rule.id,
-        )
+        if rule.mode == "soft":
+            args["weight"] = DEFAULT_WEIGHT[rule.type] * PRIORITY_FACTOR[rule.level]
+        return Constraint(type=rule.type, hard=rule.mode == "hard", args=args, label=describe_rule(rule, self.spec),
+                          source="chat", active=rule.active, id=rule.id)
 
 
 def compile_spec(spec: ProblemSpec, df: pd.DataFrame) -> CompiledProblem:

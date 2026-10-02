@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from constraint_engine.constraints import Constraint
 from constraint_engine.optimizer import OptimizationError, SolverConfig, optimize
+from constraint_engine.rules import apart, fixed, flag, members, per_slot, share, spread, together, with_one_of
 
 
 def make_df():
@@ -28,29 +28,24 @@ def base_config(num_slots=2):
     return SolverConfig(num_slots=num_slots, time_limit_seconds=15, random_seed=42)
 
 
-def cap(column, lo, hi):
-    return Constraint(type="capacity", hard=True, label=f"{lo}-{hi} {column} per class",
-                      args={"group": {"kind": "column", "column": column}, "min": lo, "max": hi})
-
-
-def balance(group, weight):
-    return Constraint(type="balance", hard=False, label="balance", args={"group": group, "weight": weight})
+def friends(requests):
+    """Friend requests as soft share rules: each requester with at least one."""
+    return [with_one_of(e, asked, hard=False) for e, asked in requests.items()]
 
 
 def base_constraints(requests=None):
-    """Shibutzit's built-in rule set for this data, written out."""
+    """Shibutzit's built-in rule set for this data, written as building blocks."""
     return [
-        Constraint(type="capacity", hard=True, label="class size 5-7",
-                   args={"group": {"kind": "all"}, "min": 5, "max": 7}),
-        cap("differential", None, 1),
-        cap("origin", 3, 4),
-        cap("inclusion", 2, 2),
-        cap("hamar", 1, 2),
-        Constraint(type="partner_requests", hard=False, label="friend requests", args={"requests": requests or {}}),
-        balance({"kind": "column_all_values", "column": "level"}, 2.0),
-        balance({"kind": "column_all_values", "column": "school"}, 2.0),
-        balance({"kind": "column_all_values", "column": "current_class"}, 1.5),
-        balance({"kind": "columns", "columns": ["differential", "origin", "inclusion", "hamar"]}, 1.0),
+        per_slot("class size 5-7", min=5, max=7),
+        per_slot("differential", items=flag("differential"), max=1),
+        per_slot("origin", items=flag("origin"), min=3, max=4),
+        per_slot("inclusion", items=flag("inclusion"), min=2, max=2),
+        per_slot("hamar", items=flag("hamar"), min=1, max=2),
+        spread("level", item_groups={"column": "level"}, weight=2.0),
+        spread("school", item_groups={"column": "school"}, weight=2.0),
+        spread("current class", item_groups={"column": "current_class"}, weight=1.5),
+        spread("categories", item_groups={"columns": ["differential", "origin", "inclusion", "hamar"]}, weight=1.0),
+        *friends(requests or {}),
     ]
 
 
@@ -83,19 +78,19 @@ def test_slot_size_balanced():
     assert abs(sizes[0] - sizes[1]) <= 1
 
 
-def test_capacity_range_respected():
+def test_count_range_respected():
     df = make_df()
     result = optimize(df, base_config(), base_constraints())
     assert all(3 <= c <= 4 for c in counts_per_slot(df, result, "origin"))
 
 
-def test_capacity_exact():
+def test_count_exact():
     df = make_df()
     result = optimize(df, base_config(), base_constraints())
     assert counts_per_slot(df, result, "inclusion") == [2, 2]
 
 
-def test_capacity_max_only():
+def test_count_max_only():
     df = make_df()
     result = optimize(df, base_config(), base_constraints())
     assert all(c <= 1 for c in counts_per_slot(df, result, "differential"))
@@ -103,8 +98,7 @@ def test_capacity_max_only():
 
 def test_fixed_assignment_respected():
     df = make_df()
-    constraints = base_constraints() + [Constraint(type="fixed", hard=True, label="1 in slot 2", args={"entity": 1, "slot": 1})]
-    result = optimize(df, base_config(), constraints)
+    result = optimize(df, base_config(), base_constraints() + [fixed(1, 1)])
     assert result.is_feasible
     assert result.assignment[1] == [1]
 
@@ -117,14 +111,12 @@ def test_invalid_num_slots_raises():
         optimize(df, config, base_constraints())
 
 
-def test_fixed_to_nonexistent_slot_raises():
-    df = make_df()
-    constraints = base_constraints() + [Constraint(type="fixed", hard=True, label="1 in slot 6", args={"entity": 1, "slot": 5})]
+def test_rule_naming_a_missing_slot_raises():
     with pytest.raises(OptimizationError):
-        optimize(df, base_config(), constraints)
+        optimize(make_df(), base_config(), base_constraints() + [fixed(1, 5)])
 
 
-def test_partner_requests_co_place_a_mutual_pair():
+def test_friend_requests_co_place_a_mutual_pair():
     df = make_df()
     # 11 & 12 are in no capacity group, so the reward is free to co-place them.
     result = optimize(df, base_config(), base_constraints(requests={11: [12], 12: [11]}))
@@ -132,58 +124,53 @@ def test_partner_requests_co_place_a_mutual_pair():
     assert result.assignment[11] == result.assignment[12]
 
 
-def test_separate_hard_keeps_pair_apart():
+def test_apart_hard_keeps_pair_apart():
     df = make_df()
-    constraints = base_constraints() + [
-        Constraint(type="separate", hard=True, args={"entity_a": 11, "entity_b": 12}, label="apart")
-    ]
-    result = optimize(df, base_config(), constraints)
+    result = optimize(df, base_config(), base_constraints() + [apart(11, 12)])
     assert result.is_feasible
     assert result.assignment[11] != result.assignment[12]
 
 
 def test_together_hard_forces_same_slot():
     df = make_df()
-    constraints = base_constraints() + [
-        Constraint(type="together", hard=True, args={"entity_a": 11, "entity_b": 12}, label="together")
-    ]
-    result = optimize(df, base_config(), constraints)
+    result = optimize(df, base_config(), base_constraints() + [together(11, 12)])
     assert result.is_feasible
     assert result.assignment[11] == result.assignment[12]
 
 
-def test_at_least_one_of_hard_satisfied():
+def test_with_one_of_hard_satisfied():
     df = make_df()
-    constraints = base_constraints() + [
-        Constraint(type="together", hard=True, args={"entity_a": 11, "entity_b": 12}, label="anchor pair"),
-        Constraint(type="at_least_one_of", hard=True, args={"entity": 10, "candidates": [11, 12]}, label="10 with 11 or 12"),
-    ]
+    constraints = base_constraints() + [together(11, 12), with_one_of(10, [11, 12])]
     result = optimize(df, base_config(), constraints)
     assert result.is_feasible
     assert slot_of(result, 10) in (slot_of(result, 11), slot_of(result, 12))
 
 
+def test_share_counts_how_many_of_a_list():
+    # 4 per class, and 1 must share with exactly 2 of [2, 3, 4, 5].
+    df = pd.DataFrame(index=range(1, 9))
+    rule = share(1, [2, 3, 4, 5], "1 with exactly two", min=2, max=2)
+    result = optimize(df, base_config(), [per_slot("size", min=4, max=4), rule])
+    mine = slot_of(result, 1)
+    assert sum(slot_of(result, e) == mine for e in (2, 3, 4, 5)) == 2
+
+
 def test_string_entity_ids_work():
     df = pd.DataFrame({"night_ok": [True, False, True, False]}, index=["ana", "ben", "cy", "dee"])
     constraints = [
-        Constraint(type="capacity", hard=True, label="2 per slot", args={"group": {"kind": "all"}, "min": 2, "max": 2}),
-        Constraint(type="balance", hard=True, label="night_ok even",
-                   args={"group": {"kind": "column", "column": "night_ok"}}),
-        Constraint(type="together", hard=True, label="ana with ben", args={"entity_a": "ana", "entity_b": "ben"}),
+        per_slot("2 per slot", min=2, max=2),
+        spread("night_ok even", items=flag("night_ok"), hard=True),
+        together("ana", "ben"),
     ]
     result = optimize(df, SolverConfig(num_slots=2, time_limit_seconds=5), constraints)
     assert result.is_feasible
     assert result.assignment["ana"] == result.assignment["ben"] != result.assignment["cy"]
 
 
-def test_balance_column_all_values_hard_forces_even_split_per_value():
+def test_hard_spread_by_column_forces_even_split_per_value():
     df = pd.DataFrame({"category": ["x", "x", "x", "x", "y", "y", "y", "y"]}, index=range(1, 9))
     config = SolverConfig(num_slots=2, time_limit_seconds=10, random_seed=1)
-    constraints = [
-        Constraint(type="capacity", hard=True, args={"group": {"kind": "all"}, "min": 4, "max": 4}, label="size"),
-        Constraint(type="balance", hard=True, args={"group": {"kind": "column_all_values", "column": "category"}, "weight": 1.0},
-                   label="test"),
-    ]
+    constraints = [per_slot("size", min=4, max=4), spread("test", item_groups={"column": "category"}, hard=True)]
     result = optimize(df, config, constraints)
     assert result.is_feasible
     counts = {"x": [0, 0], "y": [0, 0]}
@@ -192,7 +179,7 @@ def test_balance_column_all_values_hard_forces_even_split_per_value():
     assert counts == {"x": [2, 2], "y": [2, 2]}
 
 
-def test_balance_columns_hard_forces_even_split_across_columns():
+def test_hard_spread_over_flag_columns_forces_even_split_per_column():
     df = pd.DataFrame(
         {
             "flag_a": [True, True, False, False, True, False, True, False],
@@ -201,11 +188,7 @@ def test_balance_columns_hard_forces_even_split_across_columns():
         index=range(1, 9),
     )
     config = SolverConfig(num_slots=2, time_limit_seconds=10, random_seed=1)
-    constraints = [
-        Constraint(type="capacity", hard=True, args={"group": {"kind": "all"}, "min": 4, "max": 4}, label="size"),
-        Constraint(type="balance", hard=True, args={"group": {"kind": "columns", "columns": ["flag_a", "flag_b"]}, "weight": 1.0},
-                   label="test"),
-    ]
+    constraints = [per_slot("size", min=4, max=4), spread("test", item_groups={"columns": ["flag_a", "flag_b"]}, hard=True)]
     result = optimize(df, config, constraints)
     assert result.is_feasible
     assert counts_per_slot(df, result, "flag_a") == [2, 2]
@@ -214,12 +197,12 @@ def test_balance_columns_hard_forces_even_split_across_columns():
 
 def test_conflict_set_extraction_identifies_contradictory_constraints():
     df = make_df()
-    together = Constraint(type="together", hard=True, args={"entity_a": 1, "entity_b": 2}, label="together")
-    separate = Constraint(type="separate", hard=True, args={"entity_a": 1, "entity_b": 2}, label="apart")
-    result = optimize(df, base_config(), base_constraints() + [together, separate])
+    with_ = together(1, 2)
+    without = apart(1, 2)
+    result = optimize(df, base_config(), base_constraints() + [with_, without])
     assert not result.is_feasible
-    assert together.id in result.conflicting_constraint_ids
-    assert separate.id in result.conflicting_constraint_ids
+    assert with_.id in result.conflicting_constraint_ids
+    assert without.id in result.conflicting_constraint_ids
 
 
 def test_same_inputs_give_the_same_assignment():
@@ -227,3 +210,30 @@ def test_same_inputs_give_the_same_assignment():
     first = optimize(df, base_config(), base_constraints(requests={11: [12], 12: [11]}))
     second = optimize(df, base_config(), base_constraints(requests={11: [12], 12: [11]}))
     assert first.assignment == second.assignment
+
+
+def test_weighted_count_sums_a_column():
+    # Sizes 3, 3, 2, 2, 1, 1: each slot holds at most 6 of size.
+    df = pd.DataFrame({"size": [3, 3, 2, 2, 1, 1]}, index=list("abcdef"))
+    rule = per_slot("size per slot", weights={"items": df["size"].to_dict()}, max=6)
+    result = optimize(df, SolverConfig(num_slots=2, time_limit_seconds=5), [rule])
+    for s in range(2):
+        assert sum(df.loc[e, "size"] for e, slots in result.assignment.items() if s in slots) <= 6
+
+
+def test_fractional_weights_are_counted_exactly():
+    # 7.5 + 8.25 = 15.75: a slot needing exactly 15.75 takes both; 15.74 is impossible.
+    df = pd.DataFrame({"hours": [7.5, 8.25]}, index=["a", "b"])
+    cfg = SolverConfig(num_slots=1, slots_per_entity=(0, 1), slots_interchangeable=False, time_limit_seconds=5)
+
+    def hours(target):
+        return per_slot("hours", weights={"items": df["hours"].to_dict()}, min=target, max=target)
+
+    assert optimize(df, cfg, [hours(15.75)]).assignment == {"a": [0], "b": [0]}
+    assert not optimize(df, cfg, [hours(15.74)]).is_feasible
+
+
+def test_unknown_members_are_ignored():
+    df = make_df()
+    result = optimize(df, base_config(), base_constraints() + [per_slot("ghosts", items=members(99), max=0)])
+    assert result.is_feasible

@@ -4,9 +4,10 @@ reaches the solver meaning what it says."""
 import pandas as pd
 import pytest
 
-from constraint_engine.constraints import Constraint, resolve_group_members
+from constraint_engine.constraints import resolve_group_members
 from constraint_engine.dataset_schema import classify_series, describe_columns, guess_id_column, prepare_entities
 from constraint_engine.optimizer import SolverConfig, optimize
+from constraint_engine.rules import flag, per_slot
 
 
 @pytest.mark.parametrize(
@@ -82,7 +83,6 @@ def test_duplicate_ids_are_refused():
 def test_a_rule_on_a_spreadsheet_column_reaches_the_solver():
     raw = pd.DataFrame({"name": ["a", "b", "c", "d"], "Twins": ["yes", "", "yes", ""]})
     df = prepare_entities(raw, describe_columns(raw), id_column="name")
-    rule = Constraint(type="capacity", hard=True, label="at most 1 twin per slot",
-                      args={"group": {"kind": "column", "column": "Twins"}, "max": 1})
+    rule = per_slot("at most 1 twin per slot", items=flag("Twins"), max=1)
     result = optimize(df, SolverConfig(num_slots=2, time_limit_seconds=5), [rule])
     assert result.assignment["a"] != result.assignment["c"]

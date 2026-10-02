@@ -1,72 +1,58 @@
-"""Unified rule representation.
+"""The rule representation: four general building blocks.
 
-Every rule the solver can apply is a `Constraint`: a catalog `type`, a
-type-specific `args` dict, and a per-instance hard/soft flag. No rule type
-is inherently hard or soft. The optimizer, the independent verifier and the
-pre-solve checks all work over one list of these.
+Every rule is a `Constraint`: a block `type`, block-specific `args`, and a
+per-instance hard/soft flag. No block is inherently hard or soft.
 
-Entities are the rows of the data frame and are identified by its index.
-Slots are numbered 0..num_slots-1. An assignment maps each entity to the
-sorted list of slots it holds; how many it may hold is
-`SolverConfig.slots_per_entity` (one each for placement, several for
-rostering).
+Items (what is placed) are the rows of the data frame, identified by its
+index. Slots (where they go) are numbered 0..num_slots-1. An assignment maps
+each item to the sorted list of slots it holds; how many it may hold is
+`SolverConfig.slots_per_entity`. "Shares a slot" means two items hold at
+least one slot in common.
 
-"Shares a slot" below means the two entities hold at least one slot in
-common -- with one slot each, simply "are in the same slot".
+Blocks and their args:
 
-Rule types and their args:
+    count       How many placements (or how much of a weight) fall in each
+                cell of a grid of item groups x slot groups.
+                {"items": <selector>,          which items (default: all)
+                 "item_groups": <grouping>,    "all" | "each" | {"column": c}
+                                               | {"columns": [flag, ...]}
+                 "slots": [int, ...],          which slots (default: all)
+                 "slot_groups": "each" | "all" | [[int, ...], ...],
+                 "slot_group_labels": [str, ...],   names for listed groups
+                 "weights": {"items": {id: num}} | {"slots": [num, ...]},
+                 "min": num, "max": num,       every cell within the range
+                 "even": "slots" | "items",    cells as equal as possible,
+                                               compared along slot groups
+                                               (within each item group) or
+                                               along item groups
+                 "max_gap": num}               hard even: largest gap allowed
+    share       {"cases": [{"item": id, "with": [id, ...], "min": int,
+                            "max": int}, ...]}
+                Each case: the item shares a slot with min..max of `with`.
+                Together = min 1 of [b]; apart = max 0 of [b].
+    stretch     {"items": <selector>, "item_groups": "each" | {"column": c},
+                 "sequences": [[[int, ...], ...], ...],
+                 "of": "work" | "off", "min": int, "max": int,
+                 "ignore_edges": bool}
+                Each sequence is a list of time units in order, each unit a
+                list of slots. A group works a unit if any of its items
+                holds any of its slots. Every stretch of worked (of="work")
+                or unworked (of="off") units is min..max long. A stretch
+                touching either end of a sequence is never too short; with
+                ignore_edges it is not checked at all (timetable gaps: the
+                time before the first lesson is not a gap).
+    transition  {"items": <selector>, "item_groups": "each" | {"column": c},
+                 "pairs": [[int, int], ...]}
+                No group holds both slots of any pair.
 
-    capacity          {"group": <selector>, "min": int|None, "max": int|None,
-                       "slots": [int, ...]}
-                      How many of the group may hold each slot. "slots" is
-                      optional and limits the rule to those slots. As a soft
-                      rule, every unit outside the band is penalized.
-    load              {"group": <selector>, "min": int|None, "max": int|None,
-                       "slots": [int, ...], "slot_groups": [[int, ...], ...]}
-                      How many slots each entity of the group holds, counting
-                      only "slots" when given ("at most 2 night shifts"), or
-                      separately within each of "slot_groups" ("at most 1
-                      shift per day").
-    balance           {"group": <selector>, "weight": float}
-                      Spread the group as evenly as possible over the slots.
-    together          {"entity_a": id, "entity_b": id}
-                      The two share a slot.
-    separate          {"entity_a": id, "entity_b": id}
-                      The two never share a slot.
-    at_least_one_of   {"entity": id, "candidates": [id, ...]}
-                      The entity shares a slot with at least one candidate.
-    fixed             {"entity": id, "slot": int}
-                      The entity holds this slot (and maybe others).
-    run               {"group": <selector>, "units": [[int, ...], ...],
-                       "of": "work"|"off", "min": int|None, "max": int|None}
-                      "units" are time units in order (e.g. the slots of
-                      each day); an entity works a unit if it holds any of
-                      its slots. Every stretch of consecutive worked units
-                      (of="work") or unworked units (of="off") is min..max
-                      long. A stretch touching the start or end of the
-                      schedule is never too short: what came before or
-                      comes after is unknown.
-    transition        {"group": <selector>, "pairs": [[int, int], ...]}
-                      No entity of the group holds both slots of any pair
-                      ("no morning shift right after a night shift").
-    partner_requests  {"requests": {id: [id, ...]}, "weight_mutual": float,
-                       "weight_two": float}
-                      Soft goal: each requester shares a slot with a mutual
-                      request, and with at least two requested partners.
+Soft rules carry "weight" in args.
 
-Soft rules may carry "weight" in args (partner_requests carries its two
-weights instead).
+Item selectors:
 
-Group selectors:
-
-    {"kind": "all"}                                   every entity
-    {"kind": "column", "column": c}                   rows where column c is true
+    {"kind": "all"}                                   every item
+    {"kind": "column", "column": c}                   rows where flag column c is true
     {"kind": "column_value", "column": c, "value": v} rows where column c == v
     {"kind": "members", "members": [id, ...]}         an explicit list
-    {"kind": "column_all_values", "column": c}        balance only: each distinct
-                                                      value of c, under one rule
-    {"kind": "columns", "columns": [c, ...]}          balance only: each flag
-                                                      column, under one rule
 """
 
 from __future__ import annotations
@@ -77,25 +63,16 @@ from typing import Literal
 
 import pandas as pd
 
-ConstraintType = Literal[
-    "capacity", "load", "run", "transition", "balance", "together", "separate", "at_least_one_of", "fixed", "partner_requests"
-]
+ConstraintType = Literal["count", "share", "stretch", "transition"]
 ConstraintSource = Literal["builtin_default", "chat", "manual"]
 
 # Weight a soft rule gets when its args carry none.
 DEFAULT_WEIGHT = {
-    "capacity": 1.0,
-    "load": 1.0,
-    "balance": 1.0,
-    "together": 5.0,
-    "separate": 5.0,
-    "at_least_one_of": 5.0,
-    "fixed": 2.0,
-    "run": 2.0,
+    "count": 1.0,
+    "share": 5.0,
+    "stretch": 2.0,
     "transition": 2.0,
 }
-DEFAULT_WEIGHT_MUTUAL = 5.0
-DEFAULT_WEIGHT_TWO = 3.0
 
 
 @dataclass
@@ -110,7 +87,7 @@ class Constraint:
 
 
 def resolve_group_members(df: pd.DataFrame, group: dict) -> list:
-    """Return the ids (index values) of the entities a selector picks."""
+    """Return the ids (index values) of the items a selector picks."""
     kind = group.get("kind")
     if kind == "all":
         return df.index.tolist()
@@ -126,34 +103,66 @@ def resolve_group_members(df: pd.DataFrame, group: dict) -> list:
     raise ValueError(f"unknown group kind: {kind!r}")
 
 
-def subgroups(df: pd.DataFrame, group: dict) -> list[dict]:
-    """Split a multi-group selector into the single groups it covers.
+def item_groups(df: pd.DataFrame, args: dict) -> list[tuple[str, list]]:
+    """(label, item ids) for each item group a rule compares or counts."""
+    members = resolve_group_members(df, args.get("items", {"kind": "all"}))
+    grouping = args.get("item_groups", "all")
+    if grouping == "all":
+        return [("", members)]
+    if grouping == "each":
+        return [(str(e), [e]) for e in members]
+    if "column" in grouping:
+        column = grouping["column"]
+        values = df.loc[members, column]
+        order = list(dict.fromkeys(v for v in values.tolist() if not pd.isna(v)))
+        return [(f"{column} = {v}", values.index[values == v].tolist()) for v in order]
+    if "columns" in grouping:
+        chosen = set(members)
+        return [(c, [e for e in resolve_group_members(df, {"kind": "column", "column": c}) if e in chosen])
+                for c in grouping["columns"]]
+    raise ValueError(f"unknown item grouping: {grouping!r}")
 
-    "column_all_values"/"columns" put several groups under one rule (e.g.
-    "balance by school" is one rule, not one per school). Every other
-    selector is its own single group.
+
+def slot_groups(args: dict, num_slots: int, names=None) -> list[tuple[str, list[int]]]:
+    """(label, slot indexes) for each slot group a rule counts.
+
+    `names` labels single slots ("mon-am"); slots are numbered from 1
+    otherwise.
     """
-    kind = group.get("kind")
-    if kind == "column_all_values":
-        column = group["column"]
-        return [{"kind": "column_value", "column": column, "value": v} for v in df[column].dropna().unique()]
-    if kind == "columns":
-        return [{"kind": "column", "column": c} for c in group["columns"]]
-    return [group]
-
-
-def selected_slots(args: dict, num_slots: int) -> list[int]:
-    """The slots a capacity/load rule counts: its "slots" list, else all."""
     chosen = args.get("slots")
-    if chosen is None:
-        return list(range(num_slots))
-    return sorted({int(s) for s in chosen})
+    chosen = list(range(num_slots)) if chosen is None else sorted({int(s) for s in chosen})
+    grouping = args.get("slot_groups", "each")
+
+    def name(s: int) -> str:
+        return str(names[s]) if names else str(s + 1)
+
+    if grouping == "each":
+        return [(name(s), [s]) for s in chosen]
+    if grouping == "all":
+        return [("", chosen)]
+    labels = args.get("slot_group_labels") or [str(i + 1) for i in range(len(grouping))]
+    return [(label, sorted({int(s) for s in group})) for label, group in zip(labels, grouping)]
 
 
-def load_slot_groups(args: dict, num_slots: int) -> list[list[int]]:
-    """The slot sets a load rule counts separately: its "slot_groups", else
-    the single set selected_slots() gives."""
+def rule_slot_indexes(args: dict) -> list[int]:
+    """Every slot index a rule's args name, to check they exist."""
+    named = list(args.get("slots") or ())
     groups = args.get("slot_groups")
-    if groups is None:
-        return [selected_slots(args, num_slots)]
-    return [sorted({int(s) for s in group}) for group in groups]
+    if isinstance(groups, list):
+        named += [s for group in groups for s in group]
+    named += [s for sequence in args.get("sequences") or () for unit in sequence for s in unit]
+    named += [s for pair in args.get("pairs") or () for s in pair]
+    return [int(s) for s in named]
+
+
+def placement_weight(args: dict):
+    """How much one placement of item e in slot s counts toward a count
+    rule: 1, or the item's or slot's weight."""
+    weights = args.get("weights")
+    if not weights:
+        return lambda e, s: 1
+    if "items" in weights:
+        by_item = weights["items"]
+        return lambda e, s: by_item.get(e, 0)
+    by_slot = weights["slots"]
+    return lambda e, s: by_slot[s]

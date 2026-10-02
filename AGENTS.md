@@ -88,31 +88,31 @@ user approves its read-back.
 
 ## Current state
 
-The solver core came from Shibutzit and is now domain-neutral: entities are
-the rows of a DataFrame (identified by its index), slots are numbered
-0..k-1, rules address spreadsheet columns by their header, and all
-user-facing text is English in `text.py`. An assignment maps each entity to
-the sorted list of slots it holds; `SolverConfig.slots_per_entity` sets how
-many — `(1, 1)` is placement (one slot each), a wider band is rostering.
-`slots_interchangeable` (auto: on only for one slot each) decides whether
-renaming slots gives the same answer.
+The *assign* decision is built, with the first three building blocks.
+Items are the rows of a DataFrame (identified by its index), slots are
+numbered 0..k-1, and an assignment maps each item to the sorted list of
+slots it holds; `SolverConfig.slots_per_entity` sets how many — `(1, 1)` is
+placement, a wider band is rostering. `slots_interchangeable` (auto: on only
+for one slot each) decides whether renaming slots gives the same answer.
+All user-facing text is English in `text.py`.
 
-A whole problem is described by a **spec** (`spec.py`): named slots with
-attributes, the entity id column, typed rules, and settings. `compiler.py`
-checks it against the data and turns each spec rule into exactly one engine
+A problem is described by a **spec** (`spec.py`): named slots with
+attributes, the item id column, rules, and settings. `compiler.py` checks it
+against the data and turns each spec rule into exactly one engine
 `Constraint` with the same id; `readback.py` renders each rule in plain
 English. Soft rules carry a priority level (low/medium/high), never a raw
 weight.
 
 | Module | Role |
 |---|---|
-| `constraints.py` | `Constraint` (type + args + hard/soft + label), group selectors, default weights. Rule types: `capacity` (per-slot band, optional slot subset), `load` (per-entity band of slots held, optional subset or per-group), `run` (stretch lengths of worked/off time units), `transition` (forbidden slot pairs, e.g. night then morning), `balance`, `together`/`separate`/`at_least_one_of` (share / never share a slot), `fixed`, `partner_requests`. |
-| `optimizer.py` | CP-SAT model. One assumption literal per hard rule → infeasibility traced to rule ids (note: `SufficientAssumptionsForInfeasibility` returns variable indices, not list positions). Flexible rules bent via slack; option diversity incl. slot-renaming symmetry; anchor/hints. |
-| `decision_support.py` | `verify_assignment` (independent rule checker, per-rule `shortfall`), `PortfolioSearch` (rounds of 3: perfect vs compromise), `rank_tradeoffs` (compares options by each soft rule's shortfall). |
-| `feasibility.py` | Pre-solve arithmetic checks for hard capacity and load rules (counts slot places, using the load bands). |
-| `dataset_schema.py`, `excel_loader.py` | Spreadsheet loading, column-kind detection (flag/category/number), id column, entity table. |
-| `spec.py` | `ProblemSpec` (Pydantic, versioned JSON): slots, vocabulary, entity source, settings, rules as a discriminated union per type; entity/slot selectors; `spec_hash`, `data_hash`. |
-| `compiler.py` | `compile_spec` (checks every column/value/entity/slot reference, reports all problems at once as `SpecError`; priority → weight), `entity_table`, `solve_spec` (a round in slot ids, stamped with hashes, engine version, seed). |
+| `constraints.py` | `Constraint` and the four engine rule types: `count` (item groups × slot groups grid, optional weights, range or even), `share` (cases: item shares with min..max of a list), `stretch` (sequences of time units; worked/off stretch lengths; ignore_edges), `transition` (forbidden slot pairs). Item selectors, item/slot grouping helpers. |
+| `rules.py` | Python shortcuts building those rules (`per_slot`, `per_item`, `spread`, `fixed`, `together`, `apart`, `with_one_of`, `stretch`, `transition`). |
+| `optimizer.py` | CP-SAT model. One assumption literal per hard rule → infeasibility traced to rule ids (note: `SufficientAssumptionsForInfeasibility` returns variable indices, not list positions). Every block compiles hard / soft / flexible through one `finish()`. Fractional weights counted in hundredths. Option diversity incl. slot-renaming symmetry; anchor/hints. |
+| `decision_support.py` | `verify_assignment` (independent checker for every block, per-rule `shortfall`), `PortfolioSearch` (rounds of 3: perfect vs compromise), `rank_tradeoffs` (compares options by each soft rule's shortfall). |
+| `feasibility.py` | Pre-solve arithmetic checks for plain hard counts (per slot / per item). |
+| `dataset_schema.py`, `excel_loader.py` | Spreadsheet loading, column-kind detection (flag/category/number), id column, item table. |
+| `spec.py` | `ProblemSpec` (Pydantic, versioned JSON): slots, vocabulary, item source, settings, rules (`count`, `share`, `stretch`, `transition`); item/slot selectors; `spec_hash`, `data_hash`. |
+| `compiler.py` | `compile_spec` (checks every column/value/item/slot/attribute reference, reports all problems at once as `SpecError`; priority → weight), `entity_table`, `solve_spec` (a round in slot ids, stamped with hashes, engine version, seed). |
 | `readback.py` | `describe_rule` / `describe_spec`: read-backs assembled from templates in `text.py`. |
 | `text.py` | Every user-facing string, including read-back templates and spec errors. |
 
@@ -129,13 +129,11 @@ weight.
    level.~~ Done (`spec.py`, `compiler.py`, `readback.py`). Not yet: rule
    bundles (named rule sets shared by many entities, like nurse contracts),
    several entity types per problem (timetabling events), storing results.
-4. Consolidate the rule types into the building blocks above for the
-   *assign* decision: `capacity`/`load`/`fixed`/`balance` → **Count/Sum**
-   (add sum-of-column and per-column-value grouping); `together`/
-   `separate`/`at_least_one_of`/`partner_requests` → **Share**;
-   `run`/`transition` → **Stretch/Transition** (add an option to ignore
-   stretches at the edges, for timetable gaps). `slots_per_entity` becomes a
-   Count rule. Keep read-backs, checker and tests green throughout.
+4. ~~Consolidate the rule types into the building blocks for the *assign*
+   decision: Count/Sum, Share, Stretch/Transition.~~ Done. Still open:
+   counting "days worked" rather than slots (weekends worked), rule
+   bundles (contracts). `slots_per_entity` stays a setting: it is
+   structural (decides one-slot placement and slot interchangeability).
 5. MCP server on top: `load_data`, `add_rule` (returns read-back),
    `list_rules`/`remove_rule`, `solve` (3 options), `explain_conflict`,
    `why(entity)`, `export`.

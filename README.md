@@ -18,25 +18,26 @@ CP-SAT and exposed to AI agents (e.g. Claude) as MCP tools.
 
 ## Status
 
-The solver core from Shibutzit is generalized: entities and slots instead
-of students and classes, rules over any spreadsheet column, English text in
-one module. An entity can hold one slot (class placement) or several
-(shift rostering).
+A general constraint optimization engine for assignment problems. Items
+(the rows of your sheet: students, employees, lessons) are placed into
+named slots (classes, shifts, time+room cells) with attributes such as day
+and shift. An item can hold one slot (placement) or several (rostering).
 
-A problem is described by a versioned JSON **spec**: named slots with
-attributes (day, shift, ...), typed rules with entity and slot selectors,
-hard/soft mode and a priority level, and solve settings. The spec is checked
-against the data before solving, every rule has a plain-English read-back,
-and results come back in slot names, stamped with spec and data hashes.
+Every rule is one of four building blocks, each mandatory or a preference
+(low/medium/high priority), each read back in plain English:
 
-Rule types today: `capacity` (how many per slot), `load` (how many slots per
-entity, optionally per day/week/...), `run` (stretches: "at most 5 days in a
-row", "days off in pairs"), `transition` (rest: "no morning shift after a
-night"), `balance`, `together` / `separate` / `at_least_one_of`, `fixed`,
-`partner_requests`.
+| Block | Means | Examples |
+|---|---|---|
+| `count` | count placements (or sum hours, sizes...) per slot, per item, per day, per column value; keep within a range or as even as possible | class size 25-28; 2 nurses per morning; 3-6 shifts each; at most 1 shift a day; at most 40 hours; Ana fixed to Monday; no teacher in two places at once; spread schools evenly; fair weekends |
+| `share` | an item shares a slot with between X and Y of a list | together; apart; at least one friend from a list |
+| `stretch` | lengths of worked / off stretches along time | at most 5 days in a row; days off in pairs; at most 1 free period between lessons |
+| `transition` | a slot may not follow another | no morning shift after a night |
 
-Next: more of the rule catalog (best-effort coverage, fairness, rule
-bundles), then the MCP tools.
+A problem is a versioned JSON **spec**, checked against the data before
+solving. A solve returns 3 genuinely different options, each verified by an
+independent checker, in slot names, stamped with spec and data hashes.
+
+Next: the MCP server, so an AI agent can load a sheet, add rules and solve.
 
 ## Example spec
 
@@ -50,9 +51,10 @@ bundles), then the MCP tools.
   ],
   "settings": {"slots_per_entity": [0, 14], "seed": 42, "time_limit_seconds": 30},
   "rules": [
-    {"id": "nights", "type": "capacity", "slots": {"where": {"shift": "night"}}, "min": 1, "max": 1},
-    {"id": "daily", "type": "load", "per": "day", "max": 1},
-    {"id": "pair", "type": "together", "entity_a": "Ana", "entity_b": "Ben", "mode": "soft", "priority": "high"}
+    {"id": "nights", "type": "count", "per_item": "all", "per_slot": "each",
+     "slots": {"where": {"shift": "night"}}, "min": 1, "max": 1},
+    {"id": "daily", "type": "count", "per_item": "each", "per_slot": {"attribute": "day"}, "max": 1},
+    {"id": "pair", "type": "share", "item": "Ana", "with": ["Ben"], "min": 1, "mode": "soft", "priority": "high"}
   ]
 }
 ```

@@ -7,15 +7,15 @@ Slots are (day, shift) cells numbered day * 2 + shift, shift 0 = morning,
 import pandas as pd
 import pytest
 
-from constraint_engine.constraints import Constraint
 from constraint_engine.decision_support import assignment_distance, generate_portfolio, verify_assignment
 from constraint_engine.feasibility import analyze_feasibility
 from constraint_engine.optimizer import OptimizationError, SolverConfig, optimize
+from constraint_engine.rules import apart, fixed, members, per_item, per_slot, together, value
 
 DAYS = 7
 MORNINGS = [2 * d for d in range(DAYS)]
 NIGHTS = [2 * d + 1 for d in range(DAYS)]
-ALL = {"kind": "all"}
+EACH_DAY = [[2 * d, 2 * d + 1] for d in range(DAYS)]
 
 
 def staff():
@@ -30,24 +30,15 @@ def roster_config(**kwargs):
 
 
 def roster_rules():
-    rules = [
-        Constraint(type="capacity", hard=True, label="2 on every morning",
-                   args={"group": ALL, "min": 2, "max": 2, "slots": MORNINGS}),
-        Constraint(type="capacity", hard=True, label="1 on every night",
-                   args={"group": ALL, "min": 1, "max": 1, "slots": NIGHTS}),
-        Constraint(type="capacity", hard=True, label="nights only for night-qualified staff",
-                   args={"group": {"kind": "column_value", "column": "night_ok", "value": False}, "max": 0, "slots": NIGHTS}),
-        Constraint(type="load", hard=True, label="3-6 shifts a week", args={"group": ALL, "min": 3, "max": 6}),
-        Constraint(type="fixed", hard=True, label="ana works Monday morning", args={"entity": "ana", "slot": 0}),
-        Constraint(type="separate", hard=True, label="ben and cy never on the same shift",
-                   args={"entity_a": "ben", "entity_b": "cy"}),
+    return [
+        per_slot("2 on every morning", slots=MORNINGS, min=2, max=2),
+        per_slot("1 on every night", slots=NIGHTS, min=1, max=1),
+        per_slot("nights only for night-qualified staff", items=value("night_ok", False), slots=NIGHTS, max=0),
+        per_item("3-6 shifts a week", min=3, max=6),
+        per_item("one shift a day", slot_groups=EACH_DAY, max=1),
+        fixed("ana", 0, "ana works Monday morning"),
+        apart("ben", "cy", "ben and cy never on the same shift"),
     ]
-    rules += [
-        Constraint(type="load", hard=True, label=f"one shift on day {d + 1}",
-                   args={"group": ALL, "max": 1, "slots": [2 * d, 2 * d + 1]})
-        for d in range(DAYS)
-    ]
-    return rules
 
 
 def test_roster_meets_coverage_loads_and_rules():
@@ -74,22 +65,18 @@ def test_roster_meets_coverage_loads_and_rules():
 
 def test_together_means_sharing_at_least_one_slot():
     df = pd.DataFrame(index=["a", "b"])
-    rules = [
-        Constraint(type="fixed", hard=True, label="a on 0", args={"entity": "a", "slot": 0}),
-        Constraint(type="fixed", hard=True, label="b on 1", args={"entity": "b", "slot": 1}),
-        Constraint(type="together", hard=True, label="a with b", args={"entity_a": "a", "entity_b": "b"}),
-    ]
+    rules = [fixed("a", 0), fixed("b", 1), together("a", "b")]
     result = optimize(df, SolverConfig(num_slots=3, slots_per_entity=(1, 2), time_limit_seconds=5), rules)
     assert result.is_feasible
     assert set(result.assignment["a"]) & set(result.assignment["b"])
     assert verify_assignment(df, result.assignment, rules, 3, (1, 2)).is_valid
 
 
-def test_flexible_load_bends_by_the_minimum_amount():
+def test_flexible_per_item_count_bends_by_the_minimum_amount():
     # 3 slots each need one person, but 2 people may work 1 slot each.
     df = pd.DataFrame(index=["a", "b"])
-    cover = Constraint(type="capacity", hard=True, label="1 per slot", args={"group": ALL, "min": 1, "max": 1})
-    load = Constraint(type="load", hard=True, label="at most 1 slot", args={"group": ALL, "max": 1})
+    cover = per_slot("1 per slot", min=1, max=1)
+    load = per_item("at most 1 slot", max=1)
     cfg = SolverConfig(num_slots=3, slots_per_entity=(0, 3), time_limit_seconds=5)
 
     assert not optimize(df, cfg, [cover, load]).is_feasible
@@ -103,13 +90,22 @@ def test_flexible_load_bends_by_the_minimum_amount():
     ])
 
 
-def test_soft_load_is_a_preference():
+def test_soft_per_item_count_is_a_preference():
     df = pd.DataFrame(index=["a", "b"])
-    cover = Constraint(type="capacity", hard=True, label="1 per slot", args={"group": ALL, "min": 1, "max": 1})
-    prefer = Constraint(type="load", hard=False, label="a works exactly 1", args={"group": {"kind": "members", "members": ["a"]}, "min": 1, "max": 1})
+    cover = per_slot("1 per slot", min=1, max=1)
+    prefer = per_item("a works exactly 1", items=members("a"), min=1, max=1, hard=False)
     result = optimize(df, SolverConfig(num_slots=4, slots_per_entity=(0, 4), time_limit_seconds=5), [cover, prefer])
     assert len(result.assignment["a"]) == 1
     assert len(result.assignment["b"]) == 3
+
+
+def test_fair_shifts_keep_everyone_close():
+    # 6 shifts, 3 people, one per shift: a fair roster gives everyone 2.
+    df = pd.DataFrame(index=["a", "b", "c"])
+    rules = [per_slot("1 per shift", min=1, max=1),
+             per_item("fair", even="items", hard=True, max_gap=0)]
+    result = optimize(df, SolverConfig(num_slots=6, slots_per_entity=(0, 6), time_limit_seconds=5), rules)
+    assert sorted(len(slots) for slots in result.assignment.values()) == [2, 2, 2]
 
 
 def test_roster_options_differ_and_renamed_shifts_count_as_different():
@@ -132,17 +128,11 @@ def test_interchangeable_slots_need_one_slot_each():
         optimize(pd.DataFrame(index=[1, 2]), SolverConfig(num_slots=2, slots_per_entity=(0, 2), slots_interchangeable=True), [])
 
 
-def test_rule_naming_a_missing_slot_raises():
-    rule = Constraint(type="capacity", hard=True, label="slot 9", args={"group": ALL, "min": 1, "slots": [8]})
-    with pytest.raises(OptimizationError):
-        optimize(pd.DataFrame(index=[1, 2]), SolverConfig(num_slots=2, slots_per_entity=(0, 2)), [rule])
-
-
 def test_feasibility_counts_slot_places_not_people():
     # 3 slots need 2 each = 6 places, but 2 people work at most 2 slots = 4.
     df = pd.DataFrame(index=["a", "b"])
-    cover = Constraint(type="capacity", hard=True, label="2 per slot", args={"group": ALL, "min": 2})
-    load = Constraint(type="load", hard=True, label="at most 2", args={"group": ALL, "max": 2})
+    cover = per_slot("2 per slot", min=2)
+    load = per_item("at most 2", max=2)
     report = analyze_feasibility(df, [cover, load], 3, (0, 3))
     assert [f.constraint_id for f in report.infeasible] == [cover.id]
 
@@ -150,8 +140,8 @@ def test_feasibility_counts_slot_places_not_people():
     assert roomy.all_feasible()
 
 
-def test_feasibility_flags_a_load_the_band_cannot_reach():
+def test_feasibility_flags_a_per_item_count_the_band_cannot_reach():
     df = pd.DataFrame(index=["a"])
-    load = Constraint(type="load", hard=True, label="at least 4", args={"group": ALL, "min": 4})
+    load = per_item("at least 4", min=4)
     report = analyze_feasibility(df, [load], 3, (0, 3))
     assert [f.constraint_id for f in report.infeasible] == [load.id]

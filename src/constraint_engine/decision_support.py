@@ -19,13 +19,10 @@ import pandas as pd
 from constraint_engine import text
 from constraint_engine.constraints import (
     DEFAULT_WEIGHT,
-    DEFAULT_WEIGHT_MUTUAL,
-    DEFAULT_WEIGHT_TWO,
     Constraint,
-    load_slot_groups,
-    resolve_group_members,
-    selected_slots,
-    subgroups,
+    item_groups,
+    placement_weight,
+    slot_groups,
 )
 from constraint_engine.feasibility import analyze_feasibility
 from constraint_engine.optimizer import OptimizationResult, SolverConfig, optimize
@@ -167,9 +164,6 @@ def verify_assignment(
     def shares(a, b) -> bool:
         return bool(holds(a) & holds(b))
 
-    def slot_numbers(e) -> list:
-        return [name(s) for s in sorted(holds(e))]
-
     def add(con: Constraint, ok: bool, summary: str, *, expected=None, actual=None, shortfall=None,
             entities=None, slots=None, na=False):
         checks.append(RuleCheck(
@@ -180,123 +174,108 @@ def verify_assignment(
             affected_entities=list(dict.fromkeys(entities or [])), affected_slots=list(slots or []),
         ))
 
+    def held_by(ids) -> set:
+        return set().union(*(holds(e) for e in ids)) if ids else set()
+
     for con in constraints:
         if not con.active:
             continue
         args = con.args
-        if con.type == "capacity":
-            members = set(resolve_group_members(df, args["group"]))
-            slots = selected_slots(args, num_slots)
-            counts = {s: len(members & slot_members[s]) for s in slots}
+        if con.type == "count":
+            rows = item_groups(df, args)
+            columns = slot_groups(args, num_slots, slot_names)
+            weight_of = placement_weight(args)
+            cells = [[sum(weight_of(e, s) for e in ids for s in slots if s in holds(e)) for _, slots in columns]
+                     for _, ids in rows]
             lo, hi = args.get("min"), args.get("max")
-            outside = {s: max(0, (lo or 0) - count) + max(0, count - hi if hi is not None else 0)
-                       for s, count in counts.items()}
-            bad = [s for s, units in outside.items() if units]
-            add(con, not bad, text.CAPACITY_OK if not bad else text.CAPACITY_BAD.format(count=len(bad)),
-                expected={"min": lo, "max": hi}, actual={name(s): count for s, count in counts.items()},
-                shortfall=sum(outside.values()),
-                entities=[e for s in bad for e in sorted(slot_members[s] & members, key=repr)], slots=[name(s) for s in bad])
-        elif con.type == "load":
-            members = resolve_group_members(df, args["group"])
-            groups = [set(group) for group in load_slot_groups(args, num_slots)]
-            lo, hi = args.get("min"), args.get("max")
-            loads = {(e, index): len(holds(e) & group) for e in members for index, group in enumerate(groups)}
-            outside = {key: max(0, (lo or 0) - load) + max(0, load - hi if hi is not None else 0)
-                       for key, load in loads.items()}
-            bad = list(dict.fromkeys(e for (e, _), units in outside.items() if units))
-            add(con, not bad, text.LOAD_OK if not bad else text.LOAD_BAD.format(count=len(bad)),
-                expected={"min": lo, "max": hi},
-                actual={"fewest": min(loads.values(), default=0), "most": max(loads.values(), default=0)},
-                shortfall=sum(outside.values()), entities=bad)
-        elif con.type == "run":
-            members = resolve_group_members(df, args["group"])
-            units = [set(unit) for unit in args["units"]]
+            outside = {}
+            for r, row in enumerate(cells):
+                for col, value in enumerate(row):
+                    units = max(0, (lo - value) if lo is not None else 0) + max(0, (value - hi) if hi is not None else 0)
+                    if units > 1e-9:
+                        outside[r, col] = units
+            even, allowed = args.get("even"), args.get("max_gap") or 0
+            lines = []
+            if even == "slots" and len(columns) > 1:
+                lines = [[(r, col) for col in range(len(columns))] for r in range(len(rows))]
+            elif even == "items" and len(rows) > 1:
+                lines = [[(r, col) for r in range(len(rows))] for col in range(len(columns))]
+            excess, uneven, largest = [], set(), 0
+            for line in lines:
+                values = [cells[r][col] for r, col in line]
+                spread = max(values) - min(values)
+                largest = max(largest, spread)
+                if spread - allowed > 1e-9:
+                    excess.append(spread - allowed)
+                    uneven.update(cell for cell in line if cells[cell[0]][cell[1]] in (min(values), max(values)))
+            bad = sorted(set(outside) | uneven)
+
+            def cell_label(r, col):
+                return " · ".join(part for part in (rows[r][0], columns[col][0]) if part) or text.TOTAL
+
+            parts = []
+            if outside:
+                parts.append(text.COUNT_OUTSIDE.format(count=len(outside)))
+            if excess:
+                parts.append(text.COUNT_UNEVEN.format(gap=_number(largest)))
+            expected = {"min": lo, "max": hi}
+            if even:
+                expected["max_gap"] = allowed
+            add(con, not parts, "; ".join(parts) or text.COUNT_OK, expected=expected,
+                actual={cell_label(r, col): _number(cells[r][col]) for r, col in bad} if bad
+                else ({"largest_gap": _number(largest)} if even else None),
+                shortfall=_number(sum(outside.values()) + sum(excess)),
+                entities=[e for r, col in bad for e in rows[r][1] if holds(e) & set(columns[col][1])],
+                slots=list(dict.fromkeys(columns[col][0] for _, col in bad if columns[col][0])))
+        elif con.type == "share":
+            bad_cases, units_total, applicable = [], 0, False
+            for case in args["cases"]:
+                entity = case["item"]
+                others = [o for o in case["with"] if o in expected_set and o != entity]
+                if entity not in expected_set or not others:
+                    continue
+                applicable = True
+                shared = sum(shares(entity, o) for o in others)
+                lo, hi = case.get("min"), case.get("max")
+                units = max(0, (lo or 0) - shared) + max(0, (shared - hi) if hi is not None else 0)
+                if units:
+                    bad_cases.append((entity, others, shared))
+                    units_total += units
+            add(con, not bad_cases, text.SHARE_OK if not bad_cases else text.SHARE_BAD.format(count=len(bad_cases)),
+                actual={str(entity): shared for entity, _, shared in bad_cases} or None, shortfall=units_total,
+                entities=[e for entity, others, _ in bad_cases for e in [entity] + others], na=not applicable)
+        elif con.type == "stretch":
             lo, hi = args.get("min"), args.get("max")
             target = args.get("of", "work") == "work"
-            bad_stretches = 0
-            bad_entities = []
-            for e in members:
-                held = holds(e)
-                worked = [bool(held & unit) for unit in units]
-                broken = [
-                    (start, length) for start, length in stretches(worked, target)
-                    if (hi is not None and length > hi)
-                    or (lo is not None and length < lo and start > 0 and start + length < len(units))
-                ]
-                if broken:
-                    bad_stretches += len(broken)
-                    bad_entities.append(e)
-            add(con, not bad_entities, text.RUN_OK if not bad_entities else text.RUN_BAD.format(count=len(bad_entities)),
+            ignore_edges = bool(args.get("ignore_edges"))
+            bad_stretches, bad_items = 0, []
+            for _, ids in item_groups(df, {**args, "item_groups": args.get("item_groups", "each")}):
+                held = held_by(ids)
+                for sequence in args["sequences"]:
+                    worked = [bool(held & set(unit)) for unit in sequence]
+                    for start, length in stretches(worked, target):
+                        inside = start > 0 and start + length < len(sequence)
+                        too_long = hi is not None and length > hi and (inside or not ignore_edges)
+                        too_short = lo is not None and length < lo and inside
+                        if too_long or too_short:
+                            bad_stretches += 1
+                            bad_items.extend(ids)
+            add(con, not bad_stretches,
+                text.STRETCH_OK if not bad_stretches else text.STRETCH_BAD.format(count=bad_stretches),
                 expected={"min": lo, "max": hi}, actual={"stretches_outside": bad_stretches},
-                shortfall=bad_stretches, entities=bad_entities)
+                shortfall=bad_stretches, entities=bad_items)
         elif con.type == "transition":
-            members = resolve_group_members(df, args["group"])
             pairs = [(int(a), int(b)) for a, b in args["pairs"]]
-            hits = {e: [(a, b) for a, b in pairs if a in holds(e) and b in holds(e)] for e in members}
-            hits = {e: found for e, found in hits.items() if found}
-            count = sum(len(found) for found in hits.values())
-            add(con, not hits, text.TRANSITION_OK if not hits else text.TRANSITION_BAD.format(count=len(hits)),
-                expected=0, actual={e: [[name(a), name(b)] for a, b in found] for e, found in hits.items()},
-                shortfall=count, entities=list(hits))
-        elif con.type in ("separate", "together"):
-            first, second = args["entity_a"], args["entity_b"]
-            applicable = first in expected_set and second in expected_set and bool(holds(first)) and bool(holds(second))
-            same = applicable and shares(first, second)
-            ok = (not same) if con.type == "separate" else same
-            add(con, ok, text.PAIR_OK if ok else text.PAIR_BAD,
-                expected=text.PAIR_DIFFERENT if con.type == "separate" else text.PAIR_SAME,
-                actual=[slot_numbers(e) for e in (first, second)],
-                entities=[first, second], na=not applicable)
-        elif con.type == "at_least_one_of":
-            entity = args["entity"]
-            candidates = [e for e in args.get("candidates", []) if e in expected_set and e != entity]
-            applicable = entity in expected_set and bool(holds(entity)) and bool(candidates)
-            colocated = [e for e in candidates if shares(entity, e)]
-            add(con, bool(colocated), text.AT_LEAST_ONE_OK if colocated else text.AT_LEAST_ONE_BAD,
-                expected=text.AT_LEAST_ONE_EXPECTED, actual=len(colocated), entities=[entity] + candidates,
-                na=not applicable)
-        elif con.type == "fixed":
-            entity, target = args["entity"], args["slot"]
-            applicable = entity in expected_set
-            ok = applicable and target in holds(entity)
-            add(con, ok, text.FIXED_OK if ok else text.FIXED_BAD,
-                expected=name(target), actual=slot_numbers(entity), entities=[entity], na=not applicable)
-        elif con.type == "balance":
-            spreads, affected = [], []
-            for subgroup in subgroups(df, args["group"]):
-                members = set(resolve_group_members(df, subgroup))
-                counts = [len(members & group) for group in slot_members]
-                if counts:
-                    spread = max(counts) - min(counts)
-                    spreads.append(spread)
-                    if spread:
-                        affected.extend(index for index, count in enumerate(counts) if count in (min(counts), max(counts)))
-            actual = max(spreads, default=0)
-            add(con, actual == 0, text.BALANCE_OK if actual == 0 else text.BALANCE_BAD.format(gap=actual),
-                expected=text.BALANCE_EXPECTED, actual=actual, shortfall=sum(spreads), slots=[name(s) for s in sorted(set(affected))])
-        elif con.type == "partner_requests":
-            requests = args.get("requests", {})
-            relevant = [e for e in expected_entities if requests.get(e)]
-            mutual_hits = 0
-            two_hits = 0
-            unmet = []
-            for e in relevant:
-                requested = [other for other in requests.get(e, []) if other in expected_set and other != e]
-                same = [other for other in requested if shares(e, other)]
-                mutual = [other for other in same if e in requests.get(other, [])]
-                mutual_hits += bool(mutual)
-                two_hits += len(same) >= 2
-                if not mutual and len(same) < min(2, len(requested)):
-                    unmet.append(e)
-            if not relevant:
-                add(con, True, text.REQUESTS_NONE, actual={"entities_with_requests": 0}, na=True)
-            else:
-                # Satisfied when every requester gets every benefit the
-                # objective can award.
-                ok = not unmet
-                add(con, ok, text.REQUESTS_OK if ok else text.REQUESTS_BAD.format(count=len(unmet)),
-                    expected={"mutual": len(relevant), "two": len(relevant)},
-                    actual={"mutual": mutual_hits, "two": two_hits}, shortfall=len(unmet), entities=unmet)
+            found, bad_items = {}, []
+            for label, ids in item_groups(df, {**args, "item_groups": args.get("item_groups", "each")}):
+                held = held_by(ids)
+                hits = [(a, b) for a, b in pairs if a in held and b in held]
+                if hits:
+                    found[label] = [[name(a), name(b)] for a, b in hits]
+                    bad_items.extend(ids)
+            count = sum(len(hits) for hits in found.values())
+            add(con, not found, text.TRANSITION_OK if not found else text.TRANSITION_BAD.format(count=count),
+                expected=0, actual=found or None, shortfall=count, entities=bad_items)
         else:
             add(con, False, text.NO_CHECKER.format(type=con.type))
 
@@ -309,6 +288,11 @@ def verify_assignment(
     entities_assigned = sum(1 for e in expected_entities if holds(e))
     return VerificationReport(valid, summary, len(expected_set), entities_assigned,
                               hard_ok, hard_bad, soft_ok, soft_bad, checks)
+
+
+def _number(value):
+    """A count as an int, a weighted sum rounded for people to read."""
+    return int(value) if float(value).is_integer() else round(float(value), 2)
 
 
 def stretches(values: list[bool], target: bool) -> list[tuple[int, int]]:
@@ -360,8 +344,8 @@ ROUND_BUDGET_SECONDS = 30.0
 STRATEGIES = list(text.STRATEGY_TITLES)
 
 # Soft rule types each emphasis pushes. Everything not listed is left alone.
-PREFERENCE_TYPES = {"partner_requests", "together", "separate", "at_least_one_of", "fixed"}
-BALANCE_TYPES = {"balance", "capacity", "load"}
+PREFERENCE_TYPES = {"share"}
+BALANCE_TYPES = {"count"}
 
 # A refinement pushes its emphasis harder than a fresh round (see
 # profile_constraints).
@@ -379,11 +363,7 @@ REFINE_TIME_SHARES = [0.2, 0.4, 0.4]
 
 
 def _scale_weights(con: Constraint, factor: float) -> None:
-    if con.type == "partner_requests":
-        con.args["weight_mutual"] = float(con.args.get("weight_mutual", DEFAULT_WEIGHT_MUTUAL)) * factor
-        con.args["weight_two"] = float(con.args.get("weight_two", DEFAULT_WEIGHT_TWO)) * factor
-    else:
-        con.args["weight"] = float(con.args.get("weight", DEFAULT_WEIGHT.get(con.type, 1.0))) * factor
+    con.args["weight"] = float(con.args.get("weight", DEFAULT_WEIGHT.get(con.type, 1.0))) * factor
 
 
 def profile_constraints(constraints: list[Constraint], strategy: str, strength: float = 1.0) -> list[Constraint]:
@@ -427,8 +407,10 @@ def describe_exceptions(report: VerificationReport) -> list[dict]:
     for check in report.checks:
         if not check.hard or check.status != "violated" or check.constraint_id == "assignment_integrity":
             continue
-        if check.rule_type == "capacity" and isinstance(check.actual, dict) and check.affected_slots:
-            parts = ", ".join(text.SLOT_COUNT.format(slot=slot, count=check.actual[slot]) for slot in check.affected_slots)
+        bounded = isinstance(check.expected, dict) and (check.expected.get("min") is not None
+                                                         or check.expected.get("max") is not None)
+        if check.rule_type == "count" and isinstance(check.actual, dict) and bounded:
+            parts = ", ".join(text.CELL_VALUE.format(cell=cell, value=value) for cell, value in check.actual.items())
             description = text.EXCEPTION_DETAIL.format(label=check.label, parts=parts, range=_range_text(check.expected))
         else:
             description = text.EXCEPTION_SUMMARY.format(label=check.label, summary=check.summary)

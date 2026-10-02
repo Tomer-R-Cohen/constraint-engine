@@ -1,10 +1,10 @@
-"""Pre-solve feasibility analysis for hard capacity and load rules.
+"""Pre-solve feasibility analysis for hard count rules.
 
-Only capacity and load hard rules have a simple closed-form arithmetic
-pre-check (how many slot places the group can fill vs. slots*min / slots*max)
-worth doing before invoking the solver.
-Everything else (pairwise separate/together, at-least-one-of, and any
-interaction between several hard rules) has no such closed form --
+Only plain count rules (per slot or per item, no weights, no evenness) have
+a simple closed-form arithmetic pre-check worth doing before invoking the
+solver.
+Everything else (share, stretch, transition, and any interaction between
+several hard rules) has no such closed form --
 infeasibility there is only knowable by actually solving, and is explained
 afterward via the solver's own conflict-set extraction (see
 `OptimizationResult.conflicting_constraint_ids`) rather than pre-checked here.
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from constraint_engine import text
-from constraint_engine.constraints import Constraint, load_slot_groups, resolve_group_members, selected_slots
+from constraint_engine.constraints import Constraint, resolve_group_members, slot_groups
 
 
 @dataclass
@@ -43,15 +43,23 @@ class FeasibilityReport:
         return len(self.infeasible) == 0
 
 
-def _holding_bounds(load_rules: list[tuple[Constraint, set]], members: set, slots: set, num_slots: int,
+def _is_plain_count(c: Constraint, grouping: str) -> bool:
+    """A hard count of placements (no weights, no evenness) per item
+    ("each") or over all items ("all") -- the shapes with closed-form checks."""
+    return (c.active and c.hard and c.type == "count" and not c.args.get("weights") and not c.args.get("even")
+            and c.args.get("item_groups", "all") == grouping)
+
+
+def _holding_bounds(per_item_rules: list[tuple[Constraint, set]], members: set, slots: set, num_slots: int,
                     slots_per_entity: tuple[int, int]) -> tuple[dict, dict]:
     """For each member, the fewest and most of `slots` it can hold, from the
-    slots-per-entity band and the given (rule, its members) hard load rules."""
+    slots-per-entity band and the given (rule, its members) hard per-item
+    count rules."""
     load_min, load_max = slots_per_entity
     low = {e: max(0, load_min - (num_slots - len(slots))) for e in members}
     high = {e: min(load_max, len(slots)) for e in members}
-    for c, rule_members in load_rules:
-        groups = [set(group) for group in load_slot_groups(c.args, num_slots)]
+    for c, rule_members in per_item_rules:
+        groups = [set(group) for _, group in slot_groups(c.args, num_slots)]
         covered = set().union(*groups)
         disjoint = sum(len(group) for group in groups) == len(covered)
         lo, hi = c.args.get("min"), c.args.get("max")
@@ -70,10 +78,10 @@ def _holding_bounds(load_rules: list[tuple[Constraint, set]], members: set, slot
 
 def analyze_feasibility(df: pd.DataFrame, constraints: list[Constraint], num_slots: int,
                         slots_per_entity: tuple[int, int] = (1, 1)) -> FeasibilityReport:
-    """Check whether population totals can possibly satisfy each active,
-    hard "capacity" and "load" rule, independent of the solver and of any
-    other rule except the slots-per-entity band and hard load rules (which
-    bound how many slots anyone can hold).
+    """Check, before solving, whether the population alone makes a hard
+    count rule impossible: a per-slot range the group is too small or too
+    large for, or a per-item range the slots-per-entity band (and other
+    per-item counts) leave no room for. No other interaction is considered.
 
     Returns a FeasibilityReport listing each checked rule as feasible or
     not, with the arithmetic spelled out.
@@ -90,38 +98,39 @@ def analyze_feasibility(df: pd.DataFrame, constraints: list[Constraint], num_slo
     if single and n < k:
         report.add(text.FEAS_FEWER_ENTITIES_THAN_SLOTS_RULE, False, text.FEAS_FEWER_ENTITIES_THAN_SLOTS.format(n=n, k=k))
 
-    hard = [c for c in constraints if c.active and c.hard and c.type in ("capacity", "load")]
-    members_by_id = {c.id: set(resolve_group_members(df, c.args["group"])) for c in hard}
-    load_rules = [(c, members_by_id[c.id]) for c in hard if c.type == "load"]
+    per_item = [(c, set(resolve_group_members(df, c.args.get("items", {"kind": "all"}))))
+                for c in constraints if _is_plain_count(c, "each")]
+    for c, members in per_item:
+        lo, hi = c.args.get("min"), c.args.get("max")
+        ok, parts = True, []
+        # Each member on its own, in each slot group: the band and the
+        # other per-item counts must leave room for this one.
+        for _, group in slot_groups(c.args, k):
+            low, high = _holding_bounds(per_item, members, set(group), k, slots_per_entity)
+            if lo is not None and any(high[e] < lo for e in members):
+                ok = False
+                parts.append(text.FEAS_LOAD_MIN_UNREACHABLE.format(lo=lo, most=min(high.values())))
+            if hi is not None and any(low[e] > hi for e in members):
+                ok = False
+                parts.append(text.FEAS_LOAD_MAX_UNREACHABLE.format(hi=hi, fewest=max(low.values())))
+            if not ok:
+                break
+        report.add(c.label, ok, " ".join(parts) or text.FEAS_LOAD_OK, constraint_id=c.id)
 
-    for c in hard:
-        members = members_by_id[c.id]
-        slots = selected_slots(c.args, k)
-        lo = c.args.get("min")
-        hi = c.args.get("max")
-        ok = True
-        if c.type == "load":
-            # Each member on its own, in each slot group: the band and the
-            # other load rules must leave room for this one.
-            parts = []
-            for group in load_slot_groups(c.args, k):
-                low, high = _holding_bounds(load_rules, members, set(group), k, slots_per_entity)
-                if lo is not None and any(high[e] < lo for e in members):
-                    ok = False
-                    parts.append(text.FEAS_LOAD_MIN_UNREACHABLE.format(lo=lo, most=min(high.values())))
-                if hi is not None and any(low[e] > hi for e in members):
-                    ok = False
-                    parts.append(text.FEAS_LOAD_MAX_UNREACHABLE.format(hi=hi, fewest=max(low.values())))
-                if not ok:
-                    break
-            report.add(c.label, ok, " ".join(parts) or text.FEAS_LOAD_OK, constraint_id=c.id)
+    for c in constraints:
+        if not _is_plain_count(c, "all"):
             continue
-        low, high = _holding_bounds(load_rules, members, set(slots), k, slots_per_entity)
-        count = len(slots)
+        members = set(resolve_group_members(df, c.args.get("items", {"kind": "all"})))
+        groups = slot_groups(c.args, k)
+        covered = set().union(*(set(group) for _, group in groups))
+        lo, hi = c.args.get("min"), c.args.get("max")
+        low, high = _holding_bounds(per_item, members, covered, k, slots_per_entity)
+        count = len(groups)
+        ok = True
         if single:
             parts = [text.FEAS_GROUP_TOTAL.format(total=len(members))]
         else:
-            parts = [text.FEAS_GROUP_PLACES.format(most=sum(high.values()), fewest=sum(low.values()), count=count)]
+            parts = [text.FEAS_GROUP_PLACES.format(most=sum(high.values()), fewest=sum(low.values()), count=len(covered))]
         if lo is not None:
             needed = count * lo
             ok = ok and sum(high.values()) >= needed
