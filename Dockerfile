@@ -6,6 +6,8 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
+# Fictional sample data, so a hosted chat has something to load: /app/samples/*.csv
+COPY samples ./samples
 
 EXPOSE 8000
 CMD ["constraint-engine-mcp", "--transport", "streamable-http", "--host", "::", "--port", "8000"]

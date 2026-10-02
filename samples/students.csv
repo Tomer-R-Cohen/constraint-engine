@@ -1,0 +1,25 @@
+Student,School,Level,Support,Friends
+Noa,North,high,,Yael
+Yael,South,low,,Noa
+Tamar,East,mid,yes,"Shira, Maya"
+Shira,North,high,,Tamar
+Maya,South,low,,
+Lior,East,mid,,Adi
+Adi,North,high,,"Lior, Roni"
+Roni,South,low,yes,
+Gali,East,mid,,Hila
+Dana,North,high,,
+Hila,South,low,,
+Inbar,East,mid,yes,
+Keren,North,high,,Liat
+Liat,South,low,,Keren
+Meirav,East,mid,,
+Neta,North,high,yes,"Orly, Rina"
+Orly,South,low,,
+Rina,East,mid,,
+Sivan,North,high,,Tali
+Tali,South,low,yes,Sivan
+Vered,East,mid,,
+Yarden,North,high,,Ziva
+Ziva,South,low,yes,"Yarden, Efrat"
+Efrat,East,mid,,
