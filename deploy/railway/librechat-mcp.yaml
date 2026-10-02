@@ -1,0 +1,18 @@
+# Appended to the LibreChat template's librechat.yaml (which stays as it is).
+mcpSettings:
+  # LibreChat blocks internal addresses by default; allow only our engine.
+  allowedDomains:
+    - "constraint-engine.railway.internal"
+
+mcpServers:
+  constraint-engine:
+    type: streamable-http
+    url: http://constraint-engine.railway.internal:8000/mcp
+    title: "Constraint Engine"
+    description: "Assignment solver: rosters, timetables, class placement."
+    # Pass the server's instructions (read rules back, quote only tool numbers,
+    # never change a rule unasked) to the model.
+    serverInstructions: true
+    # A solve round takes up to ~30 s by default.
+    timeout: 120000
+    initTimeout: 30000
