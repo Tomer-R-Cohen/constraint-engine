@@ -144,3 +144,37 @@ def test_unknown_things_are_named(staff_csv):
         ws.get_option(pid, "round-9/option-1")
     with pytest.raises(WorkspaceError, match="not found"):
         ws.load_data("missing.csv")
+
+
+def test_schedule_tables_are_built_from_the_assignment(staff_csv):
+    ws = Workspace()
+    pid = roster(ws, staff_csv)
+    ws.add_rule(pid, rule(type="count", per_item="all", per_slot="each", min=1, max=1))
+    option = ws.solve(pid, time_budget_seconds=10)["options"][0]["option_id"]
+    shown = ws.get_option(pid, option)
+    assignment = shown["assignment"]
+
+    # A day x shift grid: one row per day, one column per shift.
+    lines = shown["table_by_slot"].splitlines()
+    assert lines[0] == "| day | morning | night |"
+    assert len(lines) == 2 + 7
+    for line, day in zip(lines[2:], ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        assert cells[0] == day
+        for cell, shift in zip(cells[1:], ["morning", "night"]):
+            expected = [e for e, slots in assignment.items() if f"{day}-{shift}" in slots]
+            assert cell.split(", ") == expected
+
+    by_item = shown["table_by_item"].splitlines()
+    assert by_item[0] == "| Item | Slots |" and len(by_item) == 2 + 5
+    assert by_item[2] == f"| Ana | {', '.join(assignment['Ana']) or '—'} |"
+
+
+def test_schedule_table_lists_slots_when_they_are_not_a_grid(staff_csv):
+    ws = Workspace()
+    pid = ws.load_data(staff_csv, id_column="Name")["problem_id"]
+    ws.set_slots(pid, grid={"class": ["A", "B"]})
+    option = ws.solve(pid, time_budget_seconds=5)["options"][0]["option_id"]
+    lines = ws.get_option(pid, option)["table_by_slot"].splitlines()
+    assert lines[0] == "| Slot | Count | Items |"
+    assert sum(int(line.split("|")[2]) for line in lines[2:]) == 5

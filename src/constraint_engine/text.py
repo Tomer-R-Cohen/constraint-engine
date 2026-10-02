@@ -223,6 +223,13 @@ How to work with the user:
 - If add_rule rejects a rule, fix the call and retry; ask the user only when
   their meaning is genuinely unclear.
 - Never invent numbers or facts about a solution: quote tool results only.
+- To show a schedule, call get_option and paste its table_by_slot or
+  table_by_item exactly as returned. Never retype or rebuild a schedule
+  yourself: a retyped schedule can silently drop or swap names.
+- Every limit the user states is a rule (add_rule), including how many
+  slots each item gets ("2 to 4 shifts each"). set_slots' slots_per_item is
+  only the outer bound; a limit kept there cannot be named when rules
+  conflict or bent in a compromise.
 - The rules belong to the user. Never add, change, relax, switch off or drop
   a rule unless the user asks for that change.
 - When rules cannot all hold, say which rules conflict (conflicting_rules)
@@ -240,8 +247,9 @@ TOOL_SET_SLOTS = (
     "Define the slots items are placed into. Either 'slots' (a list of {id, attributes}) or 'grid' (attribute "
     "-> list of values; every combination becomes a slot, e.g. {\"day\": [\"Mon\", \"Tue\"], \"shift\": "
     "[\"morning\", \"night\"]} gives Mon-morning, Mon-night, ...). List slots in time order: rules over time "
-    "follow it. slots_per_item is [min, max] slots each item holds ([1, 1] = each item in exactly one slot, the "
-    "default; a roster uses e.g. [0, 14]). vocabulary sets the words read-backs use (employee/shift, "
+    "follow it. slots_per_item is only the outer bound on slots per item: [1, 1] = each item in exactly one slot "
+    "(the default, placement); a roster uses [0, number of slots]. Put any limit the user states, like '2 to 4 "
+    "shifts each', in add_rule instead (count, per_item each, per_slot all). vocabulary sets the words read-backs use (employee/shift, "
     "student/class)."
 )
 TOOL_ADD_RULE = (
@@ -278,9 +286,13 @@ TOOL_SOLVE = (
     "'preferences' or 'balance' tilts the soft rules."
 )
 TOOL_GET_OPTION = (
-    "An option's assignment (item -> slot ids). With 'item': that item's slots and every rule involving it "
-    "(why it is where it is). With 'slot': the items in that slot."
+    "An option's assignment, with table_by_slot and table_by_item: the schedule as ready-made tables to show "
+    "the user exactly as returned. With 'item': that item's slots and every rule involving it (why it is where "
+    "it is). With 'slot': the items in that slot."
 )
 TOOL_EXPORT_OPTION = "Write an option to a file: .xlsx (sheets by item and by slot) or .csv (by item)."
 TOOL_GET_SPEC = "The problem as a versioned JSON spec (slots, settings, rules), to save or reuse."
 TOOL_SET_SPEC = "Replace slots, settings and rules with a saved JSON spec, checked against this problem's data."
+TABLE_EMPTY = "—"
+TABLE_ITEM = "Item"
+TABLE_SLOTS = "Slots"

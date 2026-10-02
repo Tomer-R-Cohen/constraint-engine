@@ -83,6 +83,39 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _cell(text_value: str) -> str:
+    return str(text_value).replace("|", "\\|")
+
+
+def _tables(problem: Problem, assignment: dict) -> dict:
+    """The schedule as Markdown tables, built by code so it can be shown
+    exactly as solved -- a model retyping a schedule drops names.
+
+    By slot: a grid when the slots are every combination of two attributes
+    (day x shift), else one row per slot. By item: one row per item."""
+    holders = {s.id: [e for e, slots in assignment.items() if s.id in slots] for s in problem.slots}
+    names = list(problem.slots[0].attributes) if problem.slots else []
+    grid = len(names) == 2 and all(list(s.attributes) == names for s in problem.slots)
+    if grid:
+        rows = list(dict.fromkeys(s.attributes[names[0]] for s in problem.slots))
+        columns = list(dict.fromkeys(s.attributes[names[1]] for s in problem.slots))
+        grid = len(rows) * len(columns) == len(problem.slots)
+    if grid:
+        where = {(s.attributes[names[0]], s.attributes[names[1]]): s.id for s in problem.slots}
+        lines = ["| " + " | ".join([_cell(names[0])] + [_cell(c) for c in columns]) + " |",
+                 "|" + "---|" * (len(columns) + 1)]
+        for row in rows:
+            cells = [", ".join(map(_cell, holders[where[row, column]])) or text.TABLE_EMPTY for column in columns]
+            lines.append("| " + " | ".join([_cell(row)] + cells) + " |")
+    else:
+        lines = [f"| {text.EXPORT_SLOT} | {text.EXPORT_COUNT} | {text.EXPORT_ITEMS} |", "|---|---|---|"]
+        lines += [f"| {_cell(slot)} | {len(items)} | {', '.join(map(_cell, items)) or text.TABLE_EMPTY} |"
+                  for slot, items in holders.items()]
+    by_item = [f"| {text.TABLE_ITEM} | {text.TABLE_SLOTS} |", "|---|---|"]
+    by_item += [f"| {_cell(e)} | {', '.join(map(_cell, slots)) or text.TABLE_EMPTY} |" for e, slots in assignment.items()]
+    return {"table_by_slot": "\n".join(lines), "table_by_item": "\n".join(by_item)}
+
+
 def read_table(path: str, sheet: Optional[str] = None, header_row: int = 1) -> pd.DataFrame:
     """A data file as a raw table: .csv, or a sheet of .xlsx/.xlsm."""
     if not os.path.exists(path):
@@ -296,7 +329,7 @@ class Workspace:
             if slot not in {s.id for s in problem.slots}:
                 raise WorkspaceError(text.SPEC_UNKNOWN_SLOT.format(slot=slot))
             return {"slot": slot, "items": [e for e, slots in assignment.items() if slot in slots]}
-        return {"option_id": option_id, "assignment": assignment}
+        return {"option_id": option_id, "assignment": assignment, **_tables(problem, assignment)}
 
     def export_option(self, problem_id: str, option_id: str, path: str) -> dict:
         """Write an option next to the original data: .xlsx (one sheet by
