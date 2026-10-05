@@ -1,5 +1,7 @@
 """The workspace behind the tools: data -> slots -> rules -> solve -> look up."""
 
+import os
+
 import pandas as pd
 import pytest
 
@@ -178,3 +180,31 @@ def test_schedule_table_lists_slots_when_they_are_not_a_grid(staff_csv):
     lines = ws.get_option(pid, option)["table_by_slot"].splitlines()
     assert lines[0] == "| Slot | Count | Items |"
     assert sum(int(line.split("|")[2]) for line in lines[2:]) == 5
+
+
+def test_problems_survive_a_restart(staff_csv, tmp_path):
+    store = str(tmp_path / "store")
+    ws = Workspace(store)
+    pid = roster(ws, staff_csv)
+    ws.add_rule(pid, rule(id="nights", type="count", per_item="all", per_slot="each",
+                          slots={"where": {"shift": "night"}}, min=1, max=1))
+    ws.add_rule(pid, rule(id="rest", type="count", per_item="each", per_slot="all", max=5, mode="soft", priority="high"))
+    ws.set_rule_active(pid, "rest", False)
+    option_id = ws.solve(pid, time_budget_seconds=10)["options"][0]["option_id"]
+    before = ws.get_option(pid, option_id)
+    os.remove(staff_csv)  # the stored copy is used, not the original
+
+    restarted = Workspace(store)
+    assert restarted.list_rules(pid) == ws.list_rules(pid)
+    assert restarted.get_spec(pid) == ws.get_spec(pid)
+    assert restarted.get_option(pid, option_id) == before
+    assert restarted.describe_data(pid) == ws.describe_data(pid)
+    refined = restarted.solve(pid, time_budget_seconds=10, refine_option=option_id)
+    assert refined["round_id"] == "round-2"
+    assert len(Workspace(store).problems[pid].rounds) == 2
+
+
+def test_without_a_store_nothing_is_written(staff_csv, tmp_path):
+    ws = Workspace()
+    roster(ws, staff_csv)
+    assert sorted(os.listdir(tmp_path)) == ["staff.csv"]

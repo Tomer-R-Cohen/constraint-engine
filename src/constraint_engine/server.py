@@ -7,11 +7,16 @@ clients) or streamable HTTP (remote clients).
 
     constraint-engine-mcp                                  # stdio
     constraint-engine-mcp --transport streamable-http --port 8000
+    constraint-engine-mcp --store D:/problems             # where work is saved
+
+Problems are saved in the store folder (default: data/problems, or the
+CONSTRAINT_ENGINE_STORE environment variable) and survive a restart.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Literal, Optional, Union
 
 from mcp.server.mcpserver import MCPServer
@@ -94,8 +99,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--store", default=os.environ.get("CONSTRAINT_ENGINE_STORE", os.path.join("data", "problems")))
     args = parser.parse_args(argv)
-    server = build_server()
+    server = build_server(Workspace(args.store))
     if args.transport == "stdio":
         server.run("stdio")
     else:

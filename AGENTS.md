@@ -147,8 +147,8 @@ weight.
    `add_rule` (returns read-back), `remove_rule`, `set_rule_active`,
    `list_rules`, `solve` (3 options; conflicts and exceptions with
    read-backs; refine), `get_option` (whole / one item and its rules / one
-   slot), `export_option`, `get_spec`/`set_spec`. Not yet: persisting
-   problems and rounds across server restarts.
+   slot), `export_option`, `get_spec`/`set_spec`. Problems and rounds are saved in a store
+   folder (`--store`, default `data/problems`) and survive a restart.
 6. Test with three examples: a shift roster, a teacher timetable, and the
    Shibutzit class-placement sample data.
 

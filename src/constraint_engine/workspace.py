@@ -5,6 +5,10 @@ its rules one at a time -- each checked against the data and read back --
 and is solved in rounds of options. Every round is stored, so an answer is
 looked up, never re-solved, and carries the fingerprints of what made it.
 
+Given a store folder, every problem is saved there after each change (a
+copy of its data file plus problem.json) and loaded back on start, so work
+survives a restart.
+
 Nothing here knows about any particular agent, client or transport; the
 MCP server (server.py) is a thin layer over these methods, and any other
 front end can use them the same way.
@@ -13,12 +17,15 @@ front end can use them the same way.
 from __future__ import annotations
 
 import itertools
+import json
 import os
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import pandas as pd
+from pydantic import TypeAdapter
 
 from constraint_engine import text
 from constraint_engine.compiler import SpecError, check_spec, compile_spec, entity_table, solve_spec
@@ -38,6 +45,9 @@ class Problem:
     raw: pd.DataFrame
     name: str = ""
     source: str = ""
+    # How the data file was read, so a stored copy reads back the same.
+    sheet: Optional[str] = None
+    header_row: int = 1
     id_column: Optional[str] = None
     vocabulary: Vocabulary = field(default_factory=Vocabulary)
     slots: list[Slot] = field(default_factory=list)
@@ -129,9 +139,59 @@ def read_table(path: str, sheet: Optional[str] = None, header_row: int = 1) -> p
     raise WorkspaceError(text.WS_UNSUPPORTED_FILE.format(extension=extension or "(none)"))
 
 
+_RULES = TypeAdapter(list[Rule])
+_PROBLEM_FILE = "problem.json"
+
+
 class Workspace:
-    def __init__(self):
+    def __init__(self, store: Optional[str] = None):
+        self.store = store
         self.problems: dict[str, Problem] = {}
+        if store:
+            os.makedirs(store, exist_ok=True)
+            for problem_id in sorted(os.listdir(store)):
+                if os.path.exists(os.path.join(store, problem_id, _PROBLEM_FILE)):
+                    self.problems[problem_id] = self._load(problem_id)
+
+    # ---- storage ----
+
+    def _folder(self, problem_id: str) -> str:
+        return os.path.join(self.store, problem_id)
+
+    def _data_file(self, problem: Problem) -> str:
+        return os.path.join(self._folder(problem.id), "data" + os.path.splitext(problem.source)[1].lower())
+
+    def _save(self, problem: Problem) -> None:
+        if not self.store:
+            return
+        record = {
+            "id": problem.id, "name": problem.name, "source": problem.source, "sheet": problem.sheet,
+            "header_row": problem.header_row, "id_column": problem.id_column,
+            "vocabulary": problem.vocabulary.model_dump(mode="json"),
+            "slots": [slot.model_dump(mode="json") for slot in problem.slots],
+            "settings": problem.settings.model_dump(mode="json"),
+            "rules": _RULES.dump_python(problem.rules, mode="json"),
+            "rounds": problem.rounds,
+        }
+        path = os.path.join(self._folder(problem.id), _PROBLEM_FILE)
+        # Write then rename, so a crash mid-write never leaves half a file.
+        with open(path + ".tmp", "w", encoding="utf-8") as out:
+            json.dump(record, out, ensure_ascii=False, indent=1)
+        os.replace(path + ".tmp", path)
+
+    def _load(self, problem_id: str) -> Problem:
+        with open(os.path.join(self._folder(problem_id), _PROBLEM_FILE), encoding="utf-8") as stored:
+            record = json.load(stored)
+        problem = Problem(
+            id=record["id"], raw=pd.DataFrame(), name=record["name"], source=record["source"],
+            sheet=record["sheet"], header_row=record["header_row"], id_column=record["id_column"],
+            vocabulary=Vocabulary.model_validate(record["vocabulary"]),
+            slots=[Slot.model_validate(slot) for slot in record["slots"]],
+            settings=Settings.model_validate(record["settings"]),
+            rules=_RULES.validate_python(record["rules"]), rounds=record["rounds"],
+        )
+        problem.raw = read_table(self._data_file(problem), problem.sheet, problem.header_row)
+        return problem
 
     def problem(self, problem_id: str) -> Problem:
         if problem_id not in self.problems:
@@ -147,9 +207,14 @@ class Workspace:
             raise WorkspaceError(text.SPEC_UNKNOWN_ID_COLUMN.format(column=id_column, columns=", ".join(map(str, raw.columns))))
         guessed = id_column is None
         problem = Problem(id=uuid.uuid4().hex[:6], raw=raw, name=name, source=os.path.basename(path),
+                          sheet=sheet, header_row=header_row,
                           id_column=id_column if id_column is not None else guess_id_column(raw))
         problem.items()  # refuses duplicate or missing ids now, not at solve time
+        if self.store:
+            os.makedirs(self._folder(problem.id), exist_ok=True)
+            shutil.copyfile(path, self._data_file(problem))
         self.problems[problem.id] = problem
+        self._save(problem)
         return {"problem_id": problem.id, **self.describe_data(problem.id), "id_column_guessed": guessed}
 
     def describe_data(self, problem_id: str) -> dict:
@@ -184,9 +249,10 @@ class Workspace:
                                           ("slots_interchangeable", slots_interchangeable)) if value is not None
         })
         candidate = Problem(**{**problem.__dict__, "slots": list(slots), "settings": Settings.model_validate(
-            settings.model_dump()), "vocabulary": vocabulary or problem.vocabulary})
+            settings.model_dump()), "vocabulary": Vocabulary.model_validate(vocabulary or problem.vocabulary)})
         self._check(candidate)
         problem.slots, problem.settings, problem.vocabulary = candidate.slots, candidate.settings, candidate.vocabulary
+        self._save(problem)
         return {"slots": len(problem.slots), "first_slots": [s.model_dump() for s in problem.slots[:10]],
                 "read_back": describe_settings(problem.spec())}
 
@@ -203,12 +269,14 @@ class Workspace:
             raise WorkspaceError(text.WS_DUPLICATE_RULE.format(rule=rule.id))
         self._check(problem, problem.rules + [rule])
         problem.rules.append(rule)
+        self._save(problem)
         return {"rule_id": rule.id, "read_back": describe_rule(rule, problem.spec())}
 
     def remove_rule(self, problem_id: str, rule_id: str) -> dict:
         problem = self.problem(problem_id)
         rule = self._rule(problem, rule_id)
         problem.rules.remove(rule)
+        self._save(problem)
         return {"removed": rule_id, "read_back": describe_rule(rule, problem.spec())}
 
     def set_rule_active(self, problem_id: str, rule_id: str, active: bool) -> dict:
@@ -216,6 +284,7 @@ class Workspace:
         rule = self._rule(problem, rule_id)
         updated = rule.model_copy(update={"active": active})
         problem.rules[problem.rules.index(rule)] = updated
+        self._save(problem)
         return {"rule_id": rule_id, "read_back": describe_rule(updated, problem.spec())}
 
     def list_rules(self, problem_id: str) -> dict:
@@ -251,6 +320,7 @@ class Workspace:
                                "id_column": spec.entities.id_column or problem.id_column, "rounds": []})
         self._check(candidate)
         self.problems[problem_id] = candidate
+        self._save(candidate)
         return self.list_rules(problem_id)
 
     # ---- solving ----
@@ -273,6 +343,7 @@ class Workspace:
         for option in result["options"]:
             option["option_id"] = f"{round_id}/{option['id']}"
         problem.rounds.append(result)
+        self._save(problem)
         return self._round_summary(problem, spec, result)
 
     @staticmethod
