@@ -24,6 +24,7 @@ Notes:
 - Model API keys are "user provided": each user enters theirs in LibreChat's UI.
 - The template allows open registration; after creating your account set
   `ALLOW_REGISTRATION=false` on LibreChat.
-- Engine state is in memory: a redeploy of `constraint-engine` loses loaded problems.
+- The engine saves problems under `/app/data/problems`. Attach a Railway volume
+  mounted at `/app/data` to `constraint-engine`, or a redeploy loses them.
 - `load_data` and `export_option` read and write files on the engine's own disk, so
   from a hosted chat they cannot reach files on your computer yet.

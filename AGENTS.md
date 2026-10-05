@@ -56,6 +56,7 @@ of domain-specific rule types.
 Vocabulary: **items** (what is placed: students, employees, lessons) are the
 rows of the user's sheet; **resources** (where they go: classes, shifts,
 time+room cells) are named, with attributes (day, shift, room...).
+In the code, items are called *entities* and resources are called *slots*.
 
 **Decisions** — three kinds, built in this order:
 
@@ -121,36 +122,40 @@ weight.
 | `spec.py` | `ProblemSpec` (Pydantic, versioned JSON): slots, vocabulary, item source, settings, rules (`count`, `share`, `stretch`, `transition`); item/slot selectors; `spec_hash`, `data_hash`. |
 | `compiler.py` | `compile_spec` (checks every column/value/item/slot/attribute reference, reports all problems at once as `SpecError`; priority → weight), `entity_table`, `solve_spec` (a round in slot ids, stamped with hashes, engine version, seed). |
 | `readback.py` | `describe_rule` / `describe_spec`: read-backs assembled from templates in `text.py`. |
-| `workspace.py` | `Workspace`: problems built step by step (load data → slots → rules → solve rounds → look up / export), every round stored with its fingerprints. Client-neutral; all tools call into it. |
+| `workspace.py` | `Workspace`: problems built step by step (load data → slots → rules → solve rounds → look up / export), every round stored with its fingerprints. With a store folder, each problem (a copy of its data file + `problem.json`) is saved after every change and loaded on start. Client-neutral; all tools call into it. |
 | `server.py` | MCP server (`MCPServer` from `mcp` 2.x) exposing the workspace as 12 tools; stdio or streamable HTTP; `constraint-engine-mcp` entry point. Tool descriptions and server instructions come from `text.py` and must stay vendor-neutral (a test checks). |
 | `text.py` | Every user-facing string, including read-back templates, spec errors, tool descriptions and server instructions. |
 
 ## Plan
 
-1. ~~Copy core + tests from Shibutzit, get tests green.~~ Done.
-2. Generalize under the tests, keeping them green at every step:
-   ~~student → entity, class → slot, fixed `FIELD_*` columns → column names
-   from the data, Hebrew labels → English, several slots per entity~~
-   (done). Slots are still bare numbers; named slots with attributes
-   (day, shift) come with the spec.
-3. ~~Define the problem spec: a versioned JSON document. Each rule: type,
-   which entities and slots it applies to, parameters, hard/soft, priority
-   level.~~ Done (`spec.py`, `compiler.py`, `readback.py`). Not yet: rule
-   bundles (named rule sets shared by many entities, like nurse contracts),
-   several entity types per problem (timetabling events), storing results.
-4. ~~Consolidate the rule types into the building blocks for the *assign*
-   decision: Count/Sum, Share, Stretch/Transition.~~ Done. Still open:
-   counting "days worked" rather than slots (weekends worked), rule
-   bundles (contracts). `slots_per_entity` stays a setting: it is
-   structural (decides one-slot placement and slot interchangeability).
-5. ~~MCP server~~ Done: `load_data`, `describe_data`, `set_slots`,
-   `add_rule` (returns read-back), `remove_rule`, `set_rule_active`,
-   `list_rules`, `solve` (3 options; conflicts and exceptions with
-   read-backs; refine), `get_option` (whole / one item and its rules / one
-   slot), `export_option`, `get_spec`/`set_spec`. Problems and rounds are saved in a store
-   folder (`--store`, default `data/problems`) and survive a restart.
-6. Test with three examples: a shift roster, a teacher timetable, and the
-   Shibutzit class-placement sample data.
+Done: core copied from Shibutzit and generalized (items, named slots with
+attributes, several slots per item, English text); the versioned spec with
+compiler and read-backs; the four *assign* blocks; the MCP server with 12
+tools; problems and rounds saved to disk (`--store`, default
+`data/problems`); fictional samples for placement, rostering and
+timetabling.
+
+Open, in order (all general mechanisms; a business is set up by data and
+rules, never by code):
+
+1. **Scale of the 3 options.** At ~1,000 items × 35 slots the first option
+   comes in seconds but options 2–3 (forced to differ) are not found
+   within the round's time.
+2. **Consecutive blocks.** An item takes N slots in a row along an ordered
+   attribute (period, hour), optionally on one value of another attribute.
+   Stretch cannot express this: it never treats an edge run as too short.
+3. **Items in several groups.** A cell holding a list (comma-separated),
+   counted in each group by grouping rules. Today grouping by a column
+   takes each cell as one value; the workaround is one yes/no column per
+   group (`flag_columns`).
+4. **Rules from a second table / rule bundles.** Limits that differ per
+   group or per contract, read from a sheet instead of one rule each.
+5. **Checking an edited option.** Verify a hand-modified assignment, report
+   what breaks, lock parts and re-solve the rest.
+6. Still open from before: counting "days worked" rather than slots.
+7. Later, on a real use case: the *when* decision (interval variables:
+   durations, no-overlap / cumulative, precedence and time windows), then
+   *order*.
 
 ## Commands
 
