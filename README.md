@@ -91,6 +91,54 @@ shift a day each, no morning after a night. Solve."*
 
 All sample data is fictional. Put real data in `data/`, which git ignores.
 
+## What to ask
+
+Say where the file is, what the slots are, and your rules in plain words.
+The model turns them into rules, reads each one back, and the solver does
+the rest. Use full paths. On your own computer, replace `<repo>` with this
+folder. On a hosted chat (Railway) the engine cannot see your drive, but the
+samples are inside it: use `/app/samples/students.csv`,
+`/app/samples/staff.csv`, `/app/samples/staff_4weeks.csv` and
+`/app/samples/lessons.csv` instead of `<repo>\samples\...`. (If a hosted
+chat says it cannot find them, redeploy the engine:
+`railway up --service constraint-engine`.)
+
+**Class placement** (`samples/students.csv`)
+*"Load `<repo>\samples\students.csv`. Make 3 classes. Each class gets
+between 7 and 9 students. Students listed as friends should be together.
+Keep schools and levels evenly mixed across classes. Solve."*
+
+**Roster** (`samples/staff.csv`)
+*"Load `<repo>\samples\staff.csv`. Days Mon–Sun, shifts morning and night.
+Two nurses every morning, one night-qualified person every night, at most
+one shift a day each, no morning after a night. Solve."*
+
+**Longer roster** (`samples/staff_4weeks.csv`)
+*"Load `<repo>\samples\staff_4weeks.csv`. Four weeks, days Mon–Sun, shifts
+morning, evening and night. Nobody works more than 5 days in a row. People
+marked 'No nights please' get no night shifts, and nobody works in their
+vacation week. Solve."*
+
+**Timetable** (`samples/lessons.csv`)
+*"Load `<repo>\samples\lessons.csv`. Slots are 5 days × 6 periods. A class
+has one lesson at a time and a teacher teaches one lesson at a time. Solve."*
+
+**Follow-ups, in any problem**
+- *"Show me option 2 as a table by person."* (or by slot)
+- *"List the rules you have so far."*
+- *"Why couldn't all the rules be met?"* The engine names the rules that
+  clash and where each option's exceptions land; it never suggests dropping
+  one.
+- *"Add a rule: Ana never works Fridays."* / *"Remove the rule about
+  nights."* A rule changes only when you ask.
+- *"Make rule 3 a low-priority wish instead of a must."* (soft rules take a
+  priority: low, medium or high)
+- *"Export option 1 to `D:\out\roster.xlsx`."*
+
+Check each read-back before you solve: it is what will be enforced. Every
+number in the answers comes from the solver, so if the model quotes one the
+tools didn't return, ask it to show the source.
+
 ## A chat window on your own computer
 
 Any MCP client works. For a browser chat that runs locally, with no Docker
