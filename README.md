@@ -91,6 +91,88 @@ shift a day each, no morning after a night. Solve."*
 
 All sample data is fictional. Put real data in `data/`, which git ignores.
 
+## A chat window on your own computer
+
+Any MCP client works. For a browser chat that runs locally, with no Docker
+and no database, use [Open WebUI](https://docs.openwebui.com/features/mcp)
+(MCP over streamable HTTP, v0.6.31 or later). It needs [uv](https://docs.astral.sh/uv/)
+and runs on Python 3.11, which uv fetches itself. Use two terminals.
+
+Terminal 1, the engine (in this repo):
+
+```
+.venv\Scripts\constraint-engine-mcp.exe --transport streamable-http --port 8000
+```
+
+Terminal 2, the chat window (PowerShell):
+
+```
+$env:DATA_DIR = "D:\projects\openwebui-data"
+$env:WEBUI_SECRET_KEY = "local-dev-secret-change-me"
+uvx --python 3.11 open-webui@latest serve --port 8080
+```
+
+Open http://localhost:8080. The first time only:
+
+1. Create the local admin account and add your model key: Admin Panel →
+   Settings → Connections → OpenAI API → **+**. Fill in only the URL and
+   the key, then save; the model then appears in the chat's model list.
+   Any provider with an OpenAI-compatible endpoint works:
+
+   | Provider | URL |
+   |---|---|
+   | OpenAI | `https://api.openai.com/v1` |
+   | Anthropic | `https://api.anthropic.com/v1` |
+   | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` |
+   | OpenRouter (many models, one key) | `https://openrouter.ai/api/v1` |
+
+   Choose a model that handles tool calls well; the engine needs them.
+   See "Which model" below.
+2. Settings → Integrations → External Tool Servers → **+**: ID
+   `constraint-engine` (any short label), type **MCP (Streamable HTTP)**,
+   URL `http://localhost:8000/mcp`, Auth **None**. Save. (Only an admin
+   sees this; the first account you create is the admin. Menu names differ
+   a little between Open WebUI versions.)
+3. In a new chat, enable the tool from the tools menu. Tools are switched
+   on per chat, so an older chat does not have them.
+
+If the model says it cannot access your files, it was not given the tools:
+check the tool is enabled in that chat, and that the model's **Function
+Calling** is set to **Native** (model Advanced Params; the name and place
+may differ by version). A working run shows tool calls such as `load_data`.
+
+Stop either one with Ctrl+C. Keep `DATA_DIR` and `WEBUI_SECRET_KEY` the
+same each time, or you start with an empty install. The engine runs on your
+PC, so `load_data` reads normal paths like `D:\...`. (The Railway setup in
+`deploy/railway/` cannot reach files on your computer; use it for a chat
+you can open from anywhere, and the local setup for your own files.)
+
+### Which model
+
+A solve takes many tool calls, so the model must call tools reliably; weak
+or very small models tend to drop arguments. Prices below are per million
+input / output tokens, from pricing summaries in October 2026 (check the
+provider's own page before relying on them).
+
+| Model | Price | Use |
+|---|---|---|
+| GPT-6 Luna | $0.10 / $0.50 | **Recommended start**: cheapest of the GPT-6 family |
+| GPT-6 Sol | $2 / $10 | Step up if Luna misses tool calls or misreads rules |
+| GPT-6 Astra | $10 / $50 | Flagship; rarely needed here |
+
+GPT-6 models reject tool calls on the chat endpoint while reasoning is on
+("Function tools with reasoning_effort are not supported ... use
+/v1/responses or set reasoning_effort to 'none'"). Set the model's
+**Reasoning Effort** to `none` (model Advanced Params, or the chat's
+controls). The solver does the hard thinking; the model only picks tools
+and fills in arguments.
+
+These have not been benchmarked with this engine. To compare, run the same
+sample prompt (the roster example above) on two models and check that the
+tools are called correctly and the read-backs match what you asked for. A
+round costs very little at these prices. Connecting straight to OpenAI is
+cheaper than going through OpenRouter, which adds a fee.
+
 ## Saving work
 
 Every problem (its data, slots, rules and every solved round) is saved to
