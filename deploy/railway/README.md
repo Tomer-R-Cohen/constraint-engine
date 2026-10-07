@@ -28,3 +28,11 @@ Notes:
   mounted at `/app/data` to `constraint-engine`, or a redeploy loses them.
 - `load_data` and `export_option` read and write files on the engine's own disk, so
   from a hosted chat they cannot reach files on your computer yet.
+
+## Live deployment
+
+The chat window: https://librechat-production-a601.up.railway.app
+
+If the address changes, find it with `railway status --json` in this repo
+(look for the `*.up.railway.app` domain on the LibreChat service) or in the
+Railway dashboard.
